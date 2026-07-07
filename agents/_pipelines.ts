@@ -1,4 +1,4 @@
-import { runCodingAgent } from './_agent';
+import { runCodingAgent, type ImageAttachment } from './_agent';
 import { AUTO_FIX_MAX_ATTEMPTS } from './_constants';
 import {
   appendTurn,
@@ -13,6 +13,9 @@ import {
   readFileFromSandbox,
   resetProjectWorkspace,
   runVerification,
+  writeUploadedFiles,
+  type SavedUploadedFile,
+  type UploadedFileInput,
 } from './_project';
 import type {
   AgentProgressEvent,
@@ -38,7 +41,7 @@ function stripReturnedPreviewLinks(text: string, previewUrl?: string) {
   }
   const escapedUrl = escapeRegExp(previewUrl);
   return text
-    .replace(new RegExp(`\\s*\\[[^\\]]*(?:打开预览|预览|preview)[^\\]]*\\]\\(${escapedUrl}\\)`, 'gi'), '')
+    .replace(new RegExp(`\\s*\\[[^\\]]*(?:미리보기 열기|미리보기|preview)[^\\]]*\\]\\(${escapedUrl}\\)`, 'gi'), '')
     .replace(new RegExp(`\\s*${escapedUrl}`, 'g'), '')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
@@ -53,16 +56,16 @@ function buildRequirementConclusionFallback(
   status: 'pending' | 'ready' | 'generated',
 ) {
   const summary = summarizeUserRequest(request);
-  const isEnglish = !/[\u3400-\u9fff]/.test(request);
+  const isKorean = /[\uac00-\ud7a3]/.test(request);
 
-  if (isEnglish) {
+  if (isKorean) {
     if (status === 'ready') {
-      return `Built this for your request: ${summary}. The preview is ready in the right preview panel.`;
+      return `요청하신 내용으로 만들었어요: ${summary}. 오른쪽 미리보기 패널에서 확인할 수 있어요.`;
     }
     if (status === 'generated') {
-      return `Generated the project for your request: ${summary}.`;
+      return `요청하신 내용으로 프로젝트를 생성했어요: ${summary}.`;
     }
-    return `Handled your request: ${summary}. Verification and preview results are being prepared.`;
+    return `요청을 처리했어요: ${summary}. 검증과 미리보기 결과를 준비하는 중이에요.`;
   }
 
   if (status === 'ready') {
@@ -86,9 +89,14 @@ function summarizeUserRequest(request: string) {
 }
 
 function isGenericCompletionReply(text: string) {
-  const normalized = text.replace(/\s+/g, '').replace(/[。.!！]+$/g, '');
-  return normalized === '已编写完成，请查看结果'
-    || normalized === '已完成，请查看结果'
+  const normalized = text.replace(/\s+/g, '').replace(/[.!?！？。]+$/g, '').toLowerCase();
+  const genericPhrases = [
+    '작성완료했습니다결과를확인해주세요',
+    '작업완료했습니다결과를확인해주세요',
+    '완료했습니다결과를확인해주세요',
+    'donepleasecheck',
+  ];
+  return genericPhrases.includes(normalized)
     || /^theagentdidnotreturnanythingdisplayable$/i.test(normalized);
 }
 
@@ -396,18 +404,54 @@ export async function runProjectDownloadPipeline(context: any): Promise<Response
   );
 }
 
+const SUPPORTED_VISION_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
+const MAX_VISION_BASE64_CHARS = 6_000_000; // ~4.4MB decoded; Anthropic's practical per-image vision limit.
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function buildUploadsManifest(saved: SavedUploadedFile[]): string {
+  if (saved.length === 0) return '';
+  return saved
+    .map((file) => `- ${file.relPath} (${file.mimeType}, ${formatBytes(file.sizeBytes)})${file.isImage ? ' [image, also attached for direct vision]' : ''}`)
+    .join('\n');
+}
+
 export async function runChatPipeline(
   context: any,
   message: string,
   send: StreamSend,
-  options: { resetProject?: boolean } = {},
+  options: { resetProject?: boolean; files?: UploadedFileInput[]; userId?: string } = {},
 ) {
   const contextConversationId = String(context.conversation_id || '');
   const pagesHeaderConversationId = getRequestHeader(context, 'makers-conversation-id');
   const headerConversationId = getRequestHeader(context, 'conversationId');
   const conversationId = contextConversationId || pagesHeaderConversationId || headerConversationId;
+  const incomingFiles = Array.isArray(options.files) ? options.files : [];
+  const loggedInUserId = typeof options.userId === 'string' ? options.userId.trim() : '';
 
-  if (!message) {
+  // Full-conversation + tool-use logging into the Makers Agent framework's
+  // built-in context.store, gated to signed-in users only. Best-effort and
+  // non-blocking so a storage hiccup never breaks the live chat stream.
+  const logHistory = (role: 'user' | 'assistant' | 'tool', content: string, metadata: Record<string, unknown>) => {
+    if (!loggedInUserId || typeof context.store?.appendMessage !== 'function') {
+      return;
+    }
+    Promise.resolve(
+      context.store.appendMessage({
+        conversationId,
+        role,
+        content,
+        metadata,
+        userId: loggedInUserId,
+      }),
+    ).catch(() => {});
+  };
+
+  if (!message && incomingFiles.length === 0) {
     send({
       type: 'result',
       data: {
@@ -420,6 +464,13 @@ export async function runChatPipeline(
     });
     return;
   }
+
+  const effectiveMessage = message || 'Please look at the attached file(s) and use them as needed.';
+
+  logHistory('user', effectiveMessage, {
+    hasFiles: incomingFiles.length > 0,
+    fileNames: incomingFiles.map((file) => file.name),
+  });
 
   if (!conversationId) {
     send({
@@ -466,6 +517,21 @@ export async function runChatPipeline(
   };
   const forwardProgress = (event: AgentProgressEvent) => {
     // Forward structured progress events directly; the frontend renders by type.
+    if (event.type === 'tool_use') {
+      logHistory('tool', JSON.stringify({ name: event.data.name, command: event.data.command }), {
+        type: 'tool_use',
+        toolUseId: event.data.id,
+        phaseHint: event.data.phaseHint,
+      });
+    }
+    if (event.type === 'tool_result') {
+      logHistory('tool', event.data.preview, {
+        type: 'tool_result',
+        toolUseId: event.data.tool_use_id,
+        toolName: event.data.toolName,
+        ok: event.data.ok,
+      });
+    }
     if (
       !isInitialProjectTurn
       && event.type === 'tool_use'
@@ -524,16 +590,39 @@ export async function runChatPipeline(
   };
 
   // The model handles creative code work; build and service steps remain deterministic.
+  const savedUploads = await writeUploadedFiles(context, state, incomingFiles);
+  const uploadsManifest = buildUploadsManifest(savedUploads);
+  const imageAttachments: ImageAttachment[] = [];
+  for (let i = 0; i < incomingFiles.length; i += 1) {
+    const file = incomingFiles[i];
+    const saved = savedUploads[i];
+    const mimeType = (saved?.mimeType || file.mimeType || '').toLowerCase();
+    const base64 = String(file.dataBase64 || '').replace(/\s+/g, '');
+    if (
+      saved?.isImage
+      && SUPPORTED_VISION_MIME_TYPES.has(mimeType)
+      && base64.length > 0
+      && base64.length <= MAX_VISION_BASE64_CHARS
+    ) {
+      imageAttachments.push({
+        mediaType: mimeType as ImageAttachment['mediaType'],
+        base64,
+      });
+    }
+  }
+
   const modelResult = await runCodingAgent(
     context,
     conversationId,
-    message,
+    effectiveMessage,
     history,
     state,
     !state.created,
     handleScaffoldLog,
     forwardProgress,
     pushEarlyFileTree,
+    uploadsManifest,
+    imageAttachments,
   );
   const sanitizedModelOutput = modelResult.success && modelResult.output
     ? sanitizeAssistantText(modelResult.output)
@@ -542,7 +631,7 @@ export async function runChatPipeline(
     ? sanitizedModelOutput
     : '';
   const fallbackReply = modelResult.success
-    ? buildRequirementConclusionFallback(message, state.previewUrl ? 'ready' : 'pending')
+    ? buildRequirementConclusionFallback(effectiveMessage, state.previewUrl ? 'ready' : 'pending')
     : (modelResult.error || 'An error occurred during processing. Please try again.');
   const assistantReply = stripReturnedPreviewLinks(sanitizeAssistantText(
     modelOutput || fallbackReply
@@ -558,8 +647,9 @@ export async function runChatPipeline(
   });
 
   if (modelResult.fatal) {
-    await appendTurn(context, conversationId, 'user', message);
+    await appendTurn(context, conversationId, 'user', effectiveMessage);
     await appendTurn(context, conversationId, 'assistant', assistantReply);
+    logHistory('assistant', assistantReply, {});
     await saveProjectState(context, conversationId, state);
 
     send({
@@ -591,8 +681,9 @@ export async function runChatPipeline(
       });
     }
 
-    await appendTurn(context, conversationId, 'user', message);
+    await appendTurn(context, conversationId, 'user', effectiveMessage);
     await appendTurn(context, conversationId, 'assistant', assistantReply);
+    logHistory('assistant', assistantReply, {});
     await saveProjectState(context, conversationId, state);
 
     send({
@@ -613,8 +704,9 @@ export async function runChatPipeline(
   }
 
   if (!modelResult.projectTouched) {
-    await appendTurn(context, conversationId, 'user', message);
+    await appendTurn(context, conversationId, 'user', effectiveMessage);
     await appendTurn(context, conversationId, 'assistant', assistantReply);
+    logHistory('assistant', assistantReply, {});
 
     send({
       type: 'result',
@@ -642,8 +734,9 @@ export async function runChatPipeline(
 
   if (build.fatal) {
     const fatalReply = build.stderr || 'The task failed, and the remaining workflow was stopped.';
-    await appendTurn(context, conversationId, 'user', message);
+    await appendTurn(context, conversationId, 'user', effectiveMessage);
     await appendTurn(context, conversationId, 'assistant', fatalReply);
+    logHistory('assistant', fatalReply, {});
     await saveProjectState(context, conversationId, state);
 
     send({
@@ -677,7 +770,7 @@ export async function runChatPipeline(
     });
 
     const autoFixPrompt = buildAutoFixPrompt(
-      message,
+      effectiveMessage,
       assistantReply,
       build,
       1,
@@ -689,7 +782,7 @@ export async function runChatPipeline(
       autoFixPrompt,
       [
         ...history,
-        { role: 'user', content: message },
+        { role: 'user', content: effectiveMessage },
         { role: 'assistant', content: assistantReply },
       ],
       state,
@@ -719,8 +812,9 @@ export async function runChatPipeline(
     build = await runVerification(context, state);
     if (build.fatal) {
       const fatalReply = build.stderr || 'The task failed, and the remaining workflow was stopped.';
-      await appendTurn(context, conversationId, 'user', message);
+      await appendTurn(context, conversationId, 'user', effectiveMessage);
       await appendTurn(context, conversationId, 'assistant', fatalReply);
+      logHistory('assistant', fatalReply, {});
       await saveProjectState(context, conversationId, state);
 
       send({
@@ -777,7 +871,7 @@ export async function runChatPipeline(
     ? ''
     : ' No preview link was obtained. Please continue by asking the agent to call publish_preview.';
   const finalFallbackReply = buildRequirementConclusionFallback(
-    message,
+    effectiveMessage,
     build.status !== 'failed' && state.previewUrl ? 'ready' : 'generated',
   );
   const baseReply = autoFixReply || (modelOutput ? assistantReply : finalFallbackReply);
@@ -787,8 +881,9 @@ export async function runChatPipeline(
   );
 
   // Append this turn first, which also creates the conversation, then write projectState to metadata.
-  await appendTurn(context, conversationId, 'user', message);
+  await appendTurn(context, conversationId, 'user', effectiveMessage);
   await appendTurn(context, conversationId, 'assistant', reply);
+  logHistory('assistant', reply, {});
   await saveProjectState(context, conversationId, state);
 
   send({

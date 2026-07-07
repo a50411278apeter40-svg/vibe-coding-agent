@@ -256,3 +256,103 @@ async function assertPreviewableProject(context: any, state: ProjectState) {
     throw new Error('The current project directory is empty. Please describe the page or feature you want to build first.');
   }
 }
+
+const webFetchInputSchema = {
+  url: z.string().describe('Absolute http(s) URL to fetch, e.g. for documentation or reference pages.'),
+};
+
+const WEB_FETCH_MAX_CHARS = 20000;
+const WEB_FETCH_TIMEOUT_MS = 15000;
+
+export function buildWebFetchTool() {
+  return defineClaudeTool(
+    'web_fetch',
+    'Fetch the text content of a URL (documentation, API references, JSON endpoints, reference pages). Returns status, content-type, and up to 20,000 characters of body text. Not for downloading binary files.',
+    webFetchInputSchema,
+    async (input) => {
+      const url = typeof input?.url === 'string' ? input.url.trim() : '';
+      if (!/^https?:\/\//i.test(url)) {
+        return {
+          content: [{ type: 'text' as const, text: 'Invalid url. Provide an absolute http:// or https:// URL.' }],
+          isError: true,
+        };
+      }
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), WEB_FETCH_TIMEOUT_MS);
+        let response: Response;
+        try {
+          response = await fetch(url, {
+            signal: controller.signal,
+            headers: { 'user-agent': 'PIXAL2.0-web-dev-agent/1.0' },
+          });
+        } finally {
+          clearTimeout(timeout);
+        }
+        const contentType = response.headers.get('content-type') || '';
+        const rawText = await response.text();
+        const truncated = rawText.length > WEB_FETCH_MAX_CHARS;
+        const text = truncated ? rawText.slice(0, WEB_FETCH_MAX_CHARS) : rawText;
+        return {
+          content: [{
+            type: 'text' as const,
+            text: stringifyToolResult({
+              status: response.status,
+              ok: response.ok,
+              contentType,
+              truncated,
+              body: text,
+            }),
+          }],
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return {
+          content: [{ type: 'text' as const, text: `Fetch failed: ${message}` }],
+          isError: true,
+        };
+      }
+    },
+  ) as ClaudeMcpTool;
+}
+
+export function buildListUploadedFilesTool(context: any, state: ProjectState) {
+  return defineClaudeTool(
+    'list_uploaded_files',
+    'List every file the user has attached/uploaded so far in this conversation, with paths relative to the project directory.',
+    {},
+    async () => {
+      try {
+        const uploadsDir = `${state.appDir}/uploads`;
+        const exists = await context.sandbox.files.exists(uploadsDir);
+        if (!exists) {
+          return {
+            content: [{ type: 'text' as const, text: stringifyToolResult({ files: [] }) }],
+          };
+        }
+        const result = await runSandboxCommand(
+          context,
+          "find . -type f",
+          { cwd: uploadsDir, timeout: 30 },
+        );
+        if (result.exitCode !== 0) {
+          throw new Error(result.stderr || result.stdout || 'Failed to list uploaded files.');
+        }
+        const files = result.stdout
+          .split('\n')
+          .map((line) => line.trim())
+          .filter(Boolean)
+          .map((line) => `uploads/${line.replace(/^\.\//, '')}`);
+        return {
+          content: [{ type: 'text' as const, text: stringifyToolResult({ files }) }],
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return {
+          content: [{ type: 'text' as const, text: message }],
+          isError: true,
+        };
+      }
+    },
+  ) as ClaudeMcpTool;
+}

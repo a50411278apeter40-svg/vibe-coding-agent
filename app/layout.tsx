@@ -2,8 +2,8 @@ import type { Metadata } from 'next';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'Web Dev Agent',
-  description: 'Build, preview, and download sandbox projects with an AI agent.',
+  title: 'PIXAL2.0',
+  description: 'PIXAL2.0 — an AI web-builder agent that builds, previews, and ships sandbox projects for you.',
 };
 
 export default function RootLayout({
@@ -12,7 +12,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="zh-CN">
+    <html lang="ko">
       <body>{children}</body>
     </html>
   );

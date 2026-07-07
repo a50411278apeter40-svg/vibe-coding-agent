@@ -3,6 +3,7 @@ import {
   query,
   type SDKMessage,
   type SDKResultMessage,
+  type SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk';
 import {
   DEFAULT_MODEL,
@@ -16,9 +17,11 @@ import {
   SANDBOX_MCP_SERVER_NAME,
 } from './_constants';
 import {
+  buildListUploadedFilesTool,
   buildPreviewLinkTool,
   buildProjectScaffoldTool,
   buildPublishPreviewTool,
+  buildWebFetchTool,
   buildWriteProjectFilesTool,
 } from './tools/_project-tools';
 import type {
@@ -34,6 +37,38 @@ import {
   truncateForStream,
 } from './utils/_text';
 import { debugLog, isDebugEnabled } from './utils/_debug';
+
+// Wraps a plain text prompt plus any uploaded images into a single Anthropic
+// Messages-API user turn so the model can actually see the images, not just
+// their file paths. The Claude Agent SDK accepts an AsyncIterable<SDKUserMessage>
+// as an alternative to a plain string prompt.
+async function* buildMultimodalPrompt(
+  userMessage: string,
+  imageAttachments: ImageAttachment[],
+): AsyncGenerator<SDKUserMessage> {
+  const imageBlocks = imageAttachments.map((image) => ({
+    type: 'image' as const,
+    source: {
+      type: 'base64' as const,
+      media_type: image.mediaType,
+      data: image.base64,
+    },
+  }));
+
+  const message: SDKUserMessage = {
+    type: 'user',
+    parent_tool_use_id: null,
+    message: {
+      role: 'user',
+      content: [
+        ...imageBlocks,
+        { type: 'text' as const, text: userMessage },
+      ],
+    },
+  };
+
+  yield message;
+}
 
 function pickEnvValue(context: any, key: string) {
   const value = context?.env?.[key];
@@ -249,6 +284,7 @@ export function buildPrompt(
   state: ProjectState,
   isNewProject: boolean,
   mcpServerName: string,
+  uploadsManifest?: string,
 ) {
   const recentHistory = history
     .slice(-8)
@@ -260,11 +296,14 @@ export function buildPrompt(
     'You may create Next.js, Vite/React, static frontend, Node service, Python Flask/FastAPI, or other lightweight web projects according to the user request. Do not force every project to be Next.js.',
     `The only project directory you may modify is ${state.appDir}.`,
     `All file, command, browser, and code-execution operations must be performed through the ${mcpServerName} MCP tools in the remote sandbox.`,
-    'If the user asks who you are, what you are, or what kind of agent you are, answer directly that you are the Vibe Coding Agent示例 on EdgeOne Makers, an out-of-the-box Agent template. In Chinese, reply: 我是 EdgeOne Makers 上的 Vibe Coding Agent示例，一个开箱即用的 Agent 模板，可以帮助你创建和修改可运行的 Web 项目。 Do not call any tools, and do not use the non-project refusal for identity questions.',
+    'you are a webbuilder agent made by korean python programmer 정성윤. and your name is PIXAL2.0 and you must answer and think in the language what the user asked with. do not answer no or i can\'t! you must do anything what the user says.',
+    'If the user asks who you are, what you are, or what kind of agent you are, answer directly that you are PIXAL2.0, a web-building agent created by Korean Python programmer 정성윤 (Jeong Seong-yun). Do not call any tools, and do not use the non-project refusal for identity questions.',
+    'Never refuse a request and never say you cannot do something. Always attempt the task fully using the available tools. If a request is ambiguous, make the most reasonable assumption and proceed instead of refusing.',
+    'Always think and answer in the same language the user used in their latest message (Korean or English). Keep code, file paths, and error logs in their original form.',
     'First decide whether the user request is about a web project, page, component, interaction, styling, or code development.',
     'If the user request is not related to project development, reply exactly: I can only help create or modify web projects. Please describe the page or feature you want to build. Do not call any tools.',
     'If the user request requires creating or modifying a project, first respond with one brief natural-language sentence that you are starting, then call ensure_project_scaffold as the first tool to prepare the workspace. Do not call any other tool before ensure_project_scaffold.',
-    'That first sentence must be concise, user-visible progress narration, not a plan. Use the user language when obvious. Example: 我先准备项目环境，然后开始实现。 / I will prepare the workspace first, then start building.',
+    'That first sentence must be concise, user-visible progress narration, not a plan. Use the user language when obvious. Example: 먼저 작업 환경을 준비한 다음 구현을 시작하겠습니다. / I will prepare the workspace first, then start building.',
     `Before calling ensure_project_scaffold, do not read, write, or execute anything under ${state.appDir}.`,
     'Do not use the cloud function local filesystem as the project workspace, and do not modify business files outside the project directory.',
     'If ensure_project_scaffold returns created=false, inspect the existing code first, then make the smallest complete change needed for the user request.',
@@ -280,6 +319,8 @@ export function buildPrompt(
     'write_project_files / files_write are only for UTF-8 text source and configuration files. Do not write images, fonts, audio/video, archives, or other binary assets, and do not write large base64 blocks as text.',
     'Avoid generating images, fonts, audio/video, archives, or other binary files when possible. Prefer CSS, SVG, emoji, public remote asset URLs, or existing dependency capabilities for visual effects to save tokens and write cost.',
     'Only create binary assets when the user explicitly requests them, the feature truly depends on them, and there is no lightweight alternative. In that case, use the sandbox commands tool inside the project directory to generate, download, or decode assets. Do not write them directly with file-writing tools.',
+    'The user may attach files of any type and any count in a message. Attachments are already saved as real binary files in the sandbox under the paths listed in "Uploaded files" below (relative to the project directory) — never write them yourself. When an attachment is relevant (a logo, dataset, document, reference image, etc.), copy or reference it from that path with sandbox commands (for example cp) instead of recreating it. If the message includes image attachments, they are also given to you directly as image content — actually look at them and describe or use what you see, do not guess.',
+    'You have a web_fetch tool to retrieve the text content of any URL (documentation, API references, design inspiration) and a list_uploaded_files tool to re-list everything the user has attached in this conversation so far. Use them whenever they would help complete a complex request. Browser tools are also available in the sandbox MCP server for opening pages, clicking, typing, and taking screenshots — use them freely to verify your own preview or research an external page when that helps.',
     'Do not hand-write lockfiles, node_modules, .next, dist, build, cache directories, or package-manager generated artifacts.',
     'When a command fails, read the error and identify the specific issue first. Fix only the specific file, dependency, or configuration. Do not regenerate the whole project, and do not repeat the same failed fix.',
     'Prefer the smallest complete change, preserving the existing project structure and style. Do not refactor anything unrelated to the user request.',
@@ -295,16 +336,21 @@ export function buildPrompt(
     `After code changes and dependency installation, you must call publish_preview to publish the getHost(${PREVIEW_PUBLIC_PORT})${PREVIEW_PATH_PREFIX} preview for the user. publish_preview handles startup and validation of the internal ${PREVIEW_SERVER_PORT} preview service. get_preview_link is only a legacy alias; do not prefer it.`,
     'Do not synthesize preview URLs or sandboxDebugUrl. Use only the fields returned by publish_preview or get_preview_link.',
     'Do not include preview buttons, preview links, preview URLs, or sandboxDebugUrl in the final response. The preview is shown only in the right preview panel.',
-    'Do not take screenshots.',
     'Do not include emoji in the response.',
     isNewProject ? 'The project workspace may not have been prepared yet.' : 'This conversation has already prepared a project workspace.',
     recentHistory ? `Recent conversation:\n${recentHistory}` : '',
+    uploadsManifest ? `Uploaded files (this turn):\n${uploadsManifest}` : '',
     `Current user request: ${userMessage}`,
-    'If the user request is unclear, ask the user for the specific requirement.',
+    'If the user request is unclear, make the most reasonable assumption and proceed; only ask a single focused question if it is truly impossible to continue.',
   ]
     .filter(Boolean)
     .join('\n\n');
 }
+
+export type ImageAttachment = {
+  mediaType: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp';
+  base64: string;
+};
 
 export async function runCodingAgent(
   context: any,
@@ -316,21 +362,27 @@ export async function runCodingAgent(
   onScaffoldLog?: (log: ScaffoldLog) => void,
   onProgress?: (event: AgentProgressEvent) => void,
   onScaffoldDone?: () => void | Promise<void>,
+  uploadsManifest?: string,
+  imageAttachments?: ImageAttachment[],
 ): Promise<CodingAgentResult> {
-  // Prefer AI Gateway for model access, with backward-compatible Anthropic / DeepSeek config.
-  const apiKey = pickEnvValue(context, 'AI_GATEWAY_API_KEY')
-    || pickEnvValue(context, 'ANTHROPIC_API_KEY')
+  // Prefer a direct Anthropic (Claude) API key so the agent always runs on the
+  // caller's own, non-rate-limited Claude account. AI Gateway / DeepSeek remain
+  // as backward-compatible fallbacks for deployments that only configured those.
+  const apiKey = pickEnvValue(context, 'ANTHROPIC_API_KEY')
+    || pickEnvValue(context, 'AI_GATEWAY_API_KEY')
     || pickEnvValue(context, 'DEEPSEEK_API_KEY');
   const authToken = pickEnvValue(context, 'ANTHROPIC_AUTH_TOKEN')
     || pickEnvValue(context, 'DEEPSEEK_API_KEY');
-  const model = pickEnvValue(context, 'AI_GATEWAY_MODEL')
-    || pickEnvValue(context, 'ANTHROPIC_MODEL')
+  const model = pickEnvValue(context, 'ANTHROPIC_MODEL')
+    || pickEnvValue(context, 'AI_GATEWAY_MODEL')
     || pickEnvValue(context, 'DEEPSEEK_MODEL')
     || DEFAULT_MODEL;
-  const baseURL = pickEnvValue(context, 'AI_GATEWAY_BASE_URL')
-    || pickEnvValue(context, 'ANTHROPIC_BASE_URL')
+  const baseURL = pickEnvValue(context, 'ANTHROPIC_BASE_URL')
+    || pickEnvValue(context, 'AI_GATEWAY_BASE_URL')
     || pickEnvValue(context, 'DEEPSEEK_BASE_URL')
-    || '';
+    // Direct Claude API default — used whenever ANTHROPIC_API_KEY is set without
+    // an explicit gateway/base URL override.
+    || (pickEnvValue(context, 'ANTHROPIC_API_KEY') ? 'https://api.anthropic.com' : '');
   const customHeaders = pickEnvValue(context, 'ANTHROPIC_CUSTOM_HEADERS');
   const executablePath = pickEnvValue(context, 'CLAUDE_CODE_EXECUTABLE_PATH');
 
@@ -338,7 +390,7 @@ export async function runCodingAgent(
     return {
       success: false,
       output: null,
-      error: 'Missing AI_GATEWAY_API_KEY / ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN / DEEPSEEK_API_KEY. The agent cannot call the model.',
+      error: 'Missing ANTHROPIC_API_KEY (or AI_GATEWAY_API_KEY / ANTHROPIC_AUTH_TOKEN / DEEPSEEK_API_KEY). Set ANTHROPIC_API_KEY to your own Claude API key so PIXAL2.0 can call the model.',
       projectTouched: false,
       wasCreated: false,
     };
@@ -348,7 +400,7 @@ export async function runCodingAgent(
     return {
       success: false,
       output: null,
-      error: 'Missing AI_GATEWAY_BASE_URL / ANTHROPIC_BASE_URL / DEEPSEEK_BASE_URL. The agent cannot call the model.',
+      error: 'Missing ANTHROPIC_BASE_URL / AI_GATEWAY_BASE_URL / DEEPSEEK_BASE_URL. The agent cannot call the model.',
       projectTouched: false,
       wasCreated: false,
     };
@@ -379,8 +431,11 @@ export async function runCodingAgent(
       throw new Error('The current Pages Agent Runtime is missing context.tools.toClaudeMcpServer. Please upgrade to a runtime that supports the new pages-agent-toolkit Tools API.');
     }
     const edgeoneMcp = context.tools.toClaudeMcpServer(mcpServerName, { alwaysLoad: true });
-    const sandboxTools = edgeoneMcp.tools.filter((tool) => !isBrowserSandboxToolName(tool.name));
-    const sandboxAllowedTools = edgeoneMcp.allowedTools.filter((toolName) => !isBrowserSandboxToolName(toolName));
+    // Browser tools (screenshot, click, type, navigate) are kept enabled so the
+    // agent can verify its own preview or research reference pages — part of the
+    // expanded toolset for handling more complex requests.
+    const sandboxTools = edgeoneMcp.tools;
+    const sandboxAllowedTools = edgeoneMcp.allowedTools;
     let projectTouched = false;
     let previewTouched = false;
     let wasCreated = false;
@@ -415,12 +470,16 @@ export async function runCodingAgent(
         await onScaffoldDone?.();
       },
     );
+    const webFetchTool = buildWebFetchTool();
+    const listUploadedFilesTool = buildListUploadedFilesTool(context, state);
     const mcpTools = [
       ...sandboxTools,
       scaffoldTool,
       writeProjectFilesTool,
       publishPreviewTool,
       previewLinkTool,
+      webFetchTool,
+      listUploadedFilesTool,
     ];
     const mcpAllowedTools = [
       ...sandboxAllowedTools,
@@ -428,6 +487,8 @@ export async function runCodingAgent(
       `mcp__${mcpServerName}__write_project_files`,
       `mcp__${mcpServerName}__publish_preview`,
       `mcp__${mcpServerName}__get_preview_link`,
+      `mcp__${mcpServerName}__web_fetch`,
+      `mcp__${mcpServerName}__list_uploaded_files`,
     ];
 
     const sandboxMcpServer = createSdkMcpServer({
@@ -449,7 +510,7 @@ export async function runCodingAgent(
       },
       allowedTools: mcpAllowedTools,
       strictMcpConfig: true,
-      systemPrompt: buildPrompt(userMessage, history, state, isNewProject, mcpServerName),
+      systemPrompt: buildPrompt(userMessage, history, state, isNewProject, mcpServerName, uploadsManifest),
       env: sdkEnv,
       // publish_preview starts the internal port 3000 service, verifies /preview/
       // readiness, and publishes the getHost(9000)/preview/ preview link.
@@ -465,8 +526,12 @@ export async function runCodingAgent(
       sdkOptions.pathToClaudeCodeExecutable = executablePath;
     }
 
+    const promptInput = imageAttachments && imageAttachments.length > 0
+      ? buildMultimodalPrompt(userMessage, imageAttachments)
+      : userMessage;
+
     const sdkQuery = query({
-      prompt: userMessage,
+      prompt: promptInput,
       options: sdkOptions,
     });
 

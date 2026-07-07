@@ -421,7 +421,7 @@ function resolvePreviewAllowedHost(context: any) {
   }
 }
 
-function shellQuote(value: string) {
+export function shellQuote(value: string) {
   return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
@@ -1028,4 +1028,117 @@ export async function createProjectArchive(
     contentType,
     size: expectedSize,
   };
+}
+
+// ---- User-uploaded file attachments ----------------------------------------
+// write_project_files / files_write only handle UTF-8 text. Uploaded binary
+// files (images, PDFs, archives, anything) are written directly as bytes via a
+// base64 round-trip: the base64 text is written with the normal text API, then
+// decoded to real bytes with `base64 -d` inside the sandbox.
+
+export type UploadedFileInput = {
+  name: string;
+  mimeType?: string;
+  dataBase64: string;
+};
+
+export type SavedUploadedFile = {
+  name: string;
+  relPath: string;
+  mimeType: string;
+  sizeBytes: number;
+  isImage: boolean;
+};
+
+const IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
+
+const EXTENSION_MIME_MAP: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.svg': 'image/svg+xml',
+  '.pdf': 'application/pdf',
+  '.txt': 'text/plain',
+  '.csv': 'text/csv',
+  '.json': 'application/json',
+};
+
+function guessMimeType(filename: string): string {
+  const ext = readFileExtension(filename);
+  return EXTENSION_MIME_MAP[ext] || 'application/octet-stream';
+}
+
+function sanitizeUploadFilename(name: string, fallback: string): string {
+  const base = (name || '').split('/').pop()?.split('\\').pop() || '';
+  const cleaned = base.replace(/[^a-zA-Z0-9_.\-]/g, '_').replace(/^\.+/, '');
+  return cleaned.slice(0, 150) || fallback;
+}
+
+// Writes every uploaded file for this turn into `${appDir}/uploads/<batch>/...`
+// and returns metadata (relative path, mime type, size, image flag) for each.
+export async function writeUploadedFiles(
+  context: any,
+  state: ProjectState,
+  files: UploadedFileInput[],
+): Promise<SavedUploadedFile[]> {
+  if (!files || files.length === 0) {
+    return [];
+  }
+
+  const sandbox = context.sandbox;
+  await sandbox.files.makeDir(state.sessionDir);
+  await sandbox.files.makeDir(state.appDir);
+
+  const batch = `${Date.now()}`;
+  const batchRelDir = `uploads/${batch}`;
+  await sandbox.files.makeDir(`${state.appDir}/${batchRelDir}`);
+
+  const saved: SavedUploadedFile[] = [];
+
+  for (let index = 0; index < files.length; index += 1) {
+    const file = files[index];
+    const safeName = sanitizeUploadFilename(file.name, `file-${index + 1}`);
+    const relPath = `${batchRelDir}/${safeName}`;
+    const absPath = `${state.appDir}/${relPath}`;
+    const tmpB64Path = `${state.sessionDir}/.upload-${batch}-${index}.b64`;
+    const base64 = String(file.dataBase64 || '').replace(/\s+/g, '');
+
+    if (!base64) {
+      throw new Error(`Uploaded file "${file.name}" has no content.`);
+    }
+
+    await sandbox.files.write(tmpB64Path, base64);
+    try {
+      const decodeResult = await runSandboxCommand(
+        context,
+        `base64 -d ${shellQuote(tmpB64Path)} > ${shellQuote(absPath)}`,
+        { timeout: 120 },
+      );
+      if (decodeResult.exitCode !== 0) {
+        throw new Error(decodeResult.stderr || decodeResult.stdout || 'base64 decode failed');
+      }
+    } catch (error) {
+      throw new Error(
+        `Failed to save uploaded file "${file.name}": ${error instanceof Error ? error.message : String(error)}`,
+      );
+    } finally {
+      await runSandboxCommand(context, `rm -f ${shellQuote(tmpB64Path)}`, { timeout: 30 }).catch(() => {});
+    }
+
+    const sizeResult = await runSandboxCommand(context, `wc -c < ${shellQuote(absPath)}`, { timeout: 30 });
+    const sizeBytes = parseInt(String(sizeResult.stdout || '0').trim(), 10) || 0;
+    const mimeType = (file.mimeType || guessMimeType(safeName)).toLowerCase();
+
+    saved.push({
+      name: file.name,
+      relPath,
+      mimeType,
+      sizeBytes,
+      isImage: IMAGE_MIME_TYPES.has(mimeType),
+    });
+  }
+
+  return saved;
 }

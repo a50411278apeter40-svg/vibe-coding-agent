@@ -58,6 +58,21 @@ type InitLog = {
   content: string;
 };
 
+type AttachedFile = {
+  id: string;
+  name: string;
+  mimeType: string;
+  sizeLabel: string;
+  dataBase64: string;
+};
+
+type AuthUser = {
+  id: string;
+  email: string;
+  username: string;
+  name: string;
+};
+
 type FileTreeItem = {
   path: string;
   name: string;
@@ -143,7 +158,7 @@ type ChatStreamEvent =
       message?: string;
     };
 
-type Locale = 'zh' | 'en';
+type Locale = 'ko' | 'en';
 
 const LANGUAGE_STORAGE_KEY = 'web-dev-agent-language';
 const EDGEONE_AI_DEPLOY_URL = 'https://edgeone.ai/makers/new?template=vibe-coding-agent&from=within&fromAgent=1&agentLang=typescript';
@@ -156,118 +171,124 @@ const NARRATION_TYPEWRITER_CHARS_PER_TICK = 1;
 const PROCESS_STEP_REVEAL_DELAY_MS = 420;
 
 const TRANSLATIONS = {
-  zh: {
+  ko: {
     languageToggleLabel: 'English',
     languageToggleAria: 'Switch language to English',
-    deployLabel: '一键部署',
+    deployLabel: '원클릭 배포',
     home: {
-      titleBefore: '今天想',
-      titleAccent: '创建',
-      titleAfter: '什么？',
-      subtitle: '把一个粗略想法变成精致的应用、网站或原型。',
-      placeholder: '请输入你想构建的内容',
-      buildNow: '立即构建',
-      building: '构建中...',
+      titleBefore: '오늘은 무엇을',
+      titleAccent: '만들어',
+      titleAfter: '볼까요?',
+      subtitle: '대략적인 아이디어를 완성도 높은 앱, 사이트, 프로토타입으로 만들어 드려요.',
+      placeholder: '만들고 싶은 것을 입력해 주세요',
+      buildNow: '지금 만들기',
+      building: '만드는 중...',
       examples: [
-        '做一个简洁好用的 Todolist',
-        '为产品设计师创建一个作品集网站',
-        '做一个带统计和主题切换的番茄钟',
+        '깔끔하고 쓰기 편한 할 일 목록 만들기',
+        '제품 디자이너를 위한 포트폴리오 사이트 만들기',
+        '통계와 테마 전환 기능이 있는 뽀모도로 타이머 만들기',
       ],
     },
     response: {
-      noDisplay: '已编写完成，请查看结果。',
-      requestFailedPrefix: '请求失败：',
-      unknownError: '未知错误',
-      agentFlowEnded: 'Agent 流程已结束。',
-      processingFailed: '请求处理失败。',
+      noDisplay: '작업이 완료되었어요. 결과를 확인해 주세요.',
+      requestFailedPrefix: '요청 실패: ',
+      unknownError: '알 수 없는 오류',
+      agentFlowEnded: 'Agent 작업이 종료되었어요.',
+      processingFailed: '요청 처리에 실패했어요.',
     },
     workspace: {
-      conversationEyebrow: '对话',
-      buildThread: '构建线程',
-      hideSteps: '隐藏',
-      viewSteps: '查看',
-      steps: '过程',
-      keepThinking: '保留思考',
-      changePlaceholder: '描述你想修改的内容',
-      send: '发送',
-      sandboxEyebrow: '沙箱',
-      livePreview: '实时预览',
-      files: '文件',
-      preview: '预览',
-      downloadSource: '下载源码',
-      downloading: '打包中...',
-      downloadFailed: '下载失败，请重试。',
-      loadingPreview: '正在加载实时预览...',
-      previewEmpty: '首次构建完成后会在这里显示预览。',
-      constructionDisclaimer: '当前仅为模板演示流程使用，模型效果可能较差，简易部署后替换自有模型',
-      previewError: '预览错误：',
-      downloadError: '下载错误：',
-      buildFailedMessage: '构建失败。源码包仍保留当前文件，便于调试。',
+      conversationEyebrow: '대화',
+      buildThread: '빌드 스레드',
+      hideSteps: '숨기기',
+      viewSteps: '보기',
+      steps: '과정',
+      keepThinking: '생각 과정 유지',
+      changePlaceholder: '수정하고 싶은 내용을 입력해 주세요',
+      send: '보내기',
+      sandboxEyebrow: '샌드박스',
+      livePreview: '실시간 미리보기',
+      files: '파일',
+      preview: '미리보기',
+      downloadSource: '소스코드 다운로드',
+      downloading: '압축 중...',
+      downloadFailed: '다운로드에 실패했어요. 다시 시도해 주세요.',
+      loadingPreview: '실시간 미리보기를 불러오는 중...',
+      previewEmpty: '첫 빌드가 끝나면 이곳에 미리보기가 표시돼요.',
+      constructionDisclaimer: '현재는 템플릿 데모용 흐름이라 모델 품질이 낮을 수 있어요. 간단히 배포한 뒤 원하는 모델로 교체해 주세요.',
+      previewError: '미리보기 오류: ',
+      downloadError: '다운로드 오류: ',
+      buildFailedMessage: '빌드에 실패했어요. 디버깅을 위해 현재 파일은 소스 패키지에 그대로 남아있어요.',
       buildFailedAfter: (attempts: number) =>
-        `自动修复 ${attempts} 次后构建仍失败。源码包仍保留当前文件，便于调试。`,
-      previewLinkReady: '已获取预览链接。',
-      previewLinkMissing: '预览链接未返回。',
+        `자동 수정을 ${attempts}번 시도했지만 빌드가 여전히 실패했어요. 디버깅을 위해 현재 파일은 그대로 남아있어요.`,
+      previewLinkReady: '미리보기 링크를 가져왔어요.',
+      previewLinkMissing: '미리보기 링크가 반환되지 않았어요.',
     },
     timeline: {
-      empty: '等待 Agent 响应...',
-      processing: '正在处理...',
+      empty: 'Agent 응답을 기다리는 중...',
+      processing: '처리 중...',
       statusLabels: {
-        waiting: '等待中',
-        running: '进行中',
-        done: '完成',
-        error: '失败',
+        waiting: '대기 중',
+        running: '진행 중',
+        done: '완료',
+        error: '실패',
       },
       definitions: {
-        scaffold: { title: '初始化沙箱', waiting: '等待准备项目工作区' },
-        modify: { title: '开始修改', waiting: '准备修改项目文件' },
-        code: { title: '写代码', waiting: '等待生成或修改项目文件' },
-        install: { title: '安装依赖', waiting: '等待安装项目依赖' },
-        preview: { title: '启动预览', waiting: '等待启动本地预览服务' },
-        link: { title: '获取链接', waiting: '等待获取预览链接' },
+        scaffold: { title: '샌드박스 초기화', waiting: '프로젝트 작업 공간 준비 대기' },
+        modify: { title: '수정 시작', waiting: '프로젝트 파일 수정 준비 중' },
+        code: { title: '코드 작성', waiting: '프로젝트 파일 생성/수정 대기' },
+        install: { title: '의존성 설치', waiting: '프로젝트 의존성 설치 대기' },
+        preview: { title: '미리보기 시작', waiting: '로컬 미리보기 서버 시작 대기' },
+        link: { title: '링크 가져오기', waiting: '미리보기 링크 가져오기 대기' },
       },
       summaries: {
-        scaffoldRunning: '正在准备项目工作区',
-        scaffoldExisting: '已复用现有项目工作区',
-        scaffoldCreated: '已准备空项目工作区',
-        scaffoldReady: '沙箱工作区已准备完成',
-        modifyStarted: '已开始修改项目文件',
-        codeAutoFix: '正在根据验证结果修复项目代码',
-        codeRunningUpdate: '正在更新项目文件',
-        codeWritingFiles: (count: number) => `正在写入 ${count} 个项目文件`,
-        codeUpdated: '已更新项目文件',
-        codeUpdatedFiles: (count: number) => `已更新 ${count} 个项目文件`,
-        installRunning: '正在安装项目依赖',
-        installDone: '项目依赖安装完成',
-        installFailed: '依赖安装失败',
-        commandFailed: (command: string, detail: string) => `命令失败：${command}${detail ? `。${detail}` : ''}`,
-        previewRunning: '正在启动本地预览服务',
-        previewWarmup: '正在预热预览页面',
-        previewStarted: '预览服务已启动',
-        previewReady: '预览服务已可访问',
-        previewFailed: '预览失败',
-        linkRunning: '正在获取预览链接',
-        linkDone: '预览链接已获取',
-        linkDoneNoUrl: '已完成预览链接获取',
-        linkMissing: '预览链接未返回',
-        processFailed: '处理失败',
-        stepFailed: (title: string) => `${title}失败`,
-        unknownStep: '步骤',
+        scaffoldRunning: '프로젝트 작업 공간을 준비하는 중',
+        scaffoldExisting: '기존 프로젝트 작업 공간을 재사용했어요',
+        scaffoldCreated: '빈 프로젝트 작업 공간을 준비했어요',
+        scaffoldReady: '샌드박스 작업 공간 준비 완료',
+        modifyStarted: '프로젝트 파일 수정을 시작했어요',
+        codeAutoFix: '검증 결과를 바탕으로 프로젝트 코드를 수정하는 중',
+        codeRunningUpdate: '프로젝트 파일을 업데이트하는 중',
+        codeWritingFiles: (count: number) => `프로젝트 파일 ${count}개를 작성하는 중`,
+        codeUpdated: '프로젝트 파일을 업데이트했어요',
+        codeUpdatedFiles: (count: number) => `프로젝트 파일 ${count}개를 업데이트했어요`,
+        installRunning: '프로젝트 의존성을 설치하는 중',
+        installDone: '프로젝트 의존성 설치 완료',
+        installFailed: '의존성 설치 실패',
+        commandFailed: (command: string, detail: string) => `명령 실패: ${command}${detail ? `. ${detail}` : ''}`,
+        previewRunning: '로컬 미리보기 서버를 시작하는 중',
+        previewWarmup: '미리보기 페이지를 준비하는 중',
+        previewStarted: '미리보기 서버가 시작되었어요',
+        previewReady: '미리보기 서버에 접속할 수 있어요',
+        previewFailed: '미리보기 실패',
+        linkRunning: '미리보기 링크를 가져오는 중',
+        linkDone: '미리보기 링크를 가져왔어요',
+        linkDoneNoUrl: '미리보기 링크 가져오기를 완료했어요',
+        linkMissing: '미리보기 링크가 반환되지 않았어요',
+        processFailed: '처리 실패',
+        stepFailed: (title: string) => `${title} 실패`,
+        unknownStep: '단계',
       },
     },
     files: {
-      empty: '暂无文件。',
-      refreshing: '更新中...',
-      selectFile: '从左侧选择一个文件以预览内容。',
-      loading: (path: string) => `正在加载 ${path}...`,
-      readFailed: '读取失败',
-      requestFailed: '请求失败',
-      lines: (count: number) => `${count} 行`,
-      truncated: '已截断',
+      empty: '아직 파일이 없어요.',
+      refreshing: '업데이트 중...',
+      selectFile: '왼쪽에서 파일을 선택하면 내용을 미리 볼 수 있어요.',
+      loading: (path: string) => `${path} 불러오는 중...`,
+      readFailed: '읽기 실패',
+      requestFailed: '요청 실패',
+      lines: (count: number) => `${count}줄`,
+      truncated: '생략됨',
+    },
+    attach: {
+      attachFile: '파일 첨부',
+      attachAria: '파일 첨부하기',
+      removeFile: '제거',
+      errorGeneric: '파일을 읽는 중 오류가 발생했어요.',
     },
   },
   en: {
-    languageToggleLabel: '中文',
-    languageToggleAria: '切换语言为中文',
+    languageToggleLabel: '한국어',
+    languageToggleAria: 'Switch language to Korean',
     deployLabel: 'Deploy',
     home: {
       titleBefore: 'What will you',
@@ -373,6 +394,12 @@ const TRANSLATIONS = {
       lines: (count: number) => `${count} line${count === 1 ? '' : 's'}`,
       truncated: 'truncated',
     },
+    attach: {
+      attachFile: 'Attach files',
+      attachAria: 'Attach files',
+      removeFile: 'Remove',
+      errorGeneric: 'Something went wrong while reading the file.',
+    },
   },
 } as const;
 
@@ -444,6 +471,61 @@ function cacheConversationId(value: string) {
   window.localStorage.setItem(CONVERSATION_STORAGE_KEY, trimmed);
 }
 
+const AUTH_USER_STORAGE_KEY = 'pixal-auth-user';
+
+function getCachedAuthUser(): AuthUser | null {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+  try {
+    const raw = window.localStorage.getItem(AUTH_USER_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed.id === 'string') {
+      return parsed as AuthUser;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function cacheAuthUser(user: AuthUser | null) {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  if (!user) {
+    window.localStorage.removeItem(AUTH_USER_STORAGE_KEY);
+    return;
+  }
+  window.localStorage.setItem(AUTH_USER_STORAGE_KEY, JSON.stringify(user));
+}
+
+function formatAttachedFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+function readFileAsBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error || new Error('파일을 읽지 못했어요.'));
+    reader.onload = () => {
+      const result = reader.result;
+      if (typeof result !== 'string') {
+        reject(new Error('파일을 읽지 못했어요.'));
+        return;
+      }
+      // result is a data URL like "data:<mime>;base64,<data>" — keep only the payload.
+      const commaIndex = result.indexOf(',');
+      resolve(commaIndex >= 0 ? result.slice(commaIndex + 1) : result);
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
 function createMessageId(role: ChatMessage['role']) {
   return `${role}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
@@ -476,7 +558,7 @@ function getAssistantScrollSignature(message: ChatMessage) {
 }
 
 export default function Home() {
-  const [language, setLanguage] = useState<Locale>('zh');
+  const [language, setLanguage] = useState<Locale>('ko');
   const [deployUrl, setDeployUrl] = useState(TENCENT_CLOUD_DEPLOY_URL);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
@@ -493,6 +575,10 @@ export default function Home() {
   const [sandboxTab, setSandboxTab] = useState<'preview' | 'files'>('preview');
   const [fileTree, setFileTree] = useState<FileTree | null>(null);
   const [filesRefreshing, setFilesRefreshing] = useState(false);
+  const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
+  const [attachError, setAttachError] = useState<string | null>(null);
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [activePreviewUrl, setActivePreviewUrl] = useState('');
   const [activePreviewRevision, setActivePreviewRevision] = useState(0);
   const [activePreviewLoaded, setActivePreviewLoaded] = useState(false);
@@ -506,7 +592,7 @@ export default function Home() {
   const showProcessThinkingRef = useRef(true);
 
   const t = TRANSLATIONS[language];
-  const canSend = input.trim().length > 0 && !loading;
+  const canSend = (input.trim().length > 0 || attachedFiles.length > 0) && !loading;
   const hasWorkspace = messages.length > 0 || Boolean(preview) || Boolean(build);
   const fileCount = fileTree?.items.filter((item) => item.type === 'file').length ?? 0;
   const latestAssistantMessage = messages.findLast((message) => message.role === 'assistant');
@@ -520,7 +606,7 @@ export default function Home() {
 
   useEffect(() => {
     const stored = window.localStorage.getItem(LANGUAGE_STORAGE_KEY);
-    if (stored === 'zh' || stored === 'en') {
+    if (stored === 'ko' || stored === 'en') {
       setLanguage(stored);
     }
   }, []);
@@ -530,7 +616,11 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    document.documentElement.lang = language === 'zh' ? 'zh-CN' : 'en';
+    setAuthUser(getCachedAuthUser());
+  }, []);
+
+  useEffect(() => {
+    document.documentElement.lang = language === 'ko' ? 'ko' : 'en';
     window.localStorage.setItem(LANGUAGE_STORAGE_KEY, language);
   }, [language]);
 
@@ -589,7 +679,8 @@ export default function Home() {
 
   async function sendMessage(message: string) {
     const trimmed = message.trim();
-    if (!trimmed || loading) {
+    const filesToSend = attachedFiles;
+    if ((!trimmed && filesToSend.length === 0) || loading) {
       return;
     }
 
@@ -919,6 +1010,9 @@ export default function Home() {
       }
     };
 
+    setAttachedFiles([]);
+    setAttachError(null);
+
     try {
       const response = await fetch('/chat', {
         method: 'POST',
@@ -930,6 +1024,16 @@ export default function Home() {
         body: JSON.stringify({
           message: trimmed,
           ...(isStartingFromHome ? { resetProject: true } : {}),
+          ...(filesToSend.length
+            ? {
+              files: filesToSend.map((file) => ({
+                name: file.name,
+                mimeType: file.mimeType,
+                dataBase64: file.dataBase64,
+              })),
+            }
+            : {}),
+          ...(authUser ? { userId: authUser.id } : {}),
         }),
       });
 
@@ -994,6 +1098,37 @@ export default function Home() {
     }
   }
 
+  async function handleFilesPicked(fileList: FileList | null) {
+    if (!fileList || fileList.length === 0) {
+      return;
+    }
+    setAttachError(null);
+    try {
+      const files = Array.from(fileList);
+      const read = await Promise.all(
+        files.map(async (file) => ({
+          id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+          name: file.name || 'file',
+          mimeType: file.type || 'application/octet-stream',
+          sizeLabel: formatAttachedFileSize(file.size),
+          dataBase64: await readFileAsBase64(file),
+        })),
+      );
+      setAttachedFiles((current) => [...current, ...read]);
+    } catch {
+      setAttachError('파일을 읽는 중 오류가 발생했어요. 다시 시도해 주세요.');
+    }
+  }
+
+  function removeAttachedFile(id: string) {
+    setAttachedFiles((current) => current.filter((file) => file.id !== id));
+  }
+
+  function handleLogout() {
+    setAuthUser(null);
+    cacheAuthUser(null);
+  }
+
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     await sendMessage(input);
@@ -1044,10 +1179,20 @@ export default function Home() {
 
   return (
     <main className="min-h-screen overflow-hidden bg-[#0a0d0b] text-white">
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        onChange={(event) => {
+          void handleFilesPicked(event.target.files);
+          event.target.value = '';
+        }}
+        className="hidden"
+      />
       <nav className="fixed inset-x-0 top-0 z-50 px-4">
         <div className="mx-auto flex h-14 items-center justify-between gap-3">
           <div className="min-w-0 text-sm font-semibold tracking-[0.06em] text-[#dff8ef] sm:text-base">
-            <span className="truncate">Coding Agent Starter</span>
+            <span className="truncate">PIXAL2.0</span>
           </div>
           <div className="flex shrink-0 items-center gap-2">
             <a
@@ -1058,9 +1203,25 @@ export default function Home() {
             >
               {t.deployLabel}
             </a>
+            {authUser ? (
+              <button
+                type="button"
+                onClick={handleLogout}
+                className="rounded-full border border-white/15 bg-[#141917]/90 px-3 py-1.5 text-xs font-semibold text-[#dff8ef] shadow-lg shadow-black/20 transition hover:border-[#f2a0a0] hover:text-white"
+              >
+                {authUser.name}
+              </button>
+            ) : (
+              <a
+                href="/login"
+                className="rounded-full border border-white/15 bg-[#141917]/90 px-3 py-1.5 text-xs font-semibold text-[#dff8ef] shadow-lg shadow-black/20 transition hover:border-[#7bd8b4] hover:text-white"
+              >
+                {language === 'ko' ? '로그인' : 'Log in'}
+              </a>
+            )}
             <button
               type="button"
-              onClick={() => setLanguage((current) => (current === 'zh' ? 'en' : 'zh'))}
+              onClick={() => setLanguage((current) => (current === 'ko' ? 'en' : 'ko'))}
               aria-label={t.languageToggleAria}
               className="rounded-full border border-white/15 bg-[#141917]/90 px-3 py-1.5 text-xs font-semibold text-[#dff8ef] shadow-lg shadow-black/20 transition hover:border-[#7bd8b4] hover:text-white"
             >
@@ -1097,7 +1258,40 @@ export default function Home() {
                 placeholder={t.home.placeholder}
                 className="min-h-[180px] w-full resize-none rounded-t-[20px] border-0 bg-transparent px-8 py-7 text-[clamp(1.25rem,2vw,2rem)] font-medium text-white outline-none placeholder:text-[#bac3bd]"
               />
-              <div className="flex justify-end px-6">
+              {attachedFiles.length > 0 && (
+                <div className="flex flex-wrap gap-2 px-8 pb-3">
+                  {attachedFiles.map((file) => (
+                    <span
+                      key={file.id}
+                      className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/[0.06] px-3 py-1 text-xs text-[#dfe6e2]"
+                    >
+                      <span className="max-w-[160px] truncate">{file.name}</span>
+                      <span className="text-white/40">{file.sizeLabel}</span>
+                      <button
+                        type="button"
+                        onClick={() => removeAttachedFile(file.id)}
+                        aria-label={t.attach.removeFile}
+                        className="text-white/50 hover:text-white"
+                      >
+                        ×
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
+              {attachError && (
+                <p className="px-8 pb-2 text-xs text-[#f2a0a0]">{attachError}</p>
+              )}
+              <div className="flex items-center justify-between gap-3 px-6">
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  aria-label={t.attach.attachAria}
+                  className="inline-flex h-11 items-center gap-2 rounded-full border border-white/15 bg-white/[0.05] px-4 text-sm font-medium text-[#dfe6e2] transition hover:border-[#7bd8b4] hover:text-white"
+                >
+                  <PaperclipIcon />
+                  {t.attach.attachFile}
+                </button>
                 <button
                   type="submit"
                   disabled={!canSend}
@@ -1196,8 +1390,38 @@ export default function Home() {
               })}
             </div>
 
-            <div className="space-y-3 border-t border-white/10 p-4">
+            <div className="space-y-2 border-t border-white/10 p-4">
+              {attachedFiles.length > 0 && (
+                <div className="flex flex-wrap gap-2">
+                  {attachedFiles.map((file) => (
+                    <span
+                      key={file.id}
+                      className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/[0.06] px-3 py-1 text-xs text-[#dfe6e2]"
+                    >
+                      <span className="max-w-[140px] truncate">{file.name}</span>
+                      <span className="text-white/40">{file.sizeLabel}</span>
+                      <button
+                        type="button"
+                        onClick={() => removeAttachedFile(file.id)}
+                        aria-label={t.attach.removeFile}
+                        className="text-white/50 hover:text-white"
+                      >
+                        ×
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
+              {attachError && <p className="text-xs text-[#f2a0a0]">{attachError}</p>}
               <form onSubmit={handleSubmit} className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  aria-label={t.attach.attachAria}
+                  className="flex size-11 shrink-0 items-center justify-center rounded-full border border-white/10 bg-black/25 text-[#dfe6e2] transition hover:border-[#7bd8b4] hover:text-white"
+                >
+                  <PaperclipIcon />
+                </button>
                 <input
                   value={input}
                   onChange={(event) => setInput(event.target.value)}
@@ -1700,7 +1924,7 @@ function getTimelineStepPhase(
     return classifyLogText(step.text, step.stream, copy)?.phase ?? null;
   }
   if (step.kind === 'error') {
-    return /preview|预览|link|链接/i.test(step.text)
+    return /preview|미리보기|link|링크/i.test(step.text)
       ? 'link'
       : isInstallText(step.text)
         ? 'install'
@@ -1806,7 +2030,7 @@ function normalizeTimelineSteps(steps: TimelineStep[], copy: TimelineCopy): Norm
     }
 
     if (step.kind === 'error') {
-      const phase = /preview|预览|link|链接/i.test(step.text)
+      const phase = /preview|미리보기|link|링크/i.test(step.text)
         ? 'link'
         : isInstallText(step.text)
           ? 'install'
@@ -1986,22 +2210,22 @@ function classifyStatusText(text: string, copy: TimelineCopy): {
   status: NormalizedStepStatus;
   summary: string;
 } | null {
-  if (/准备项目工作区|prepar(?:e|ing) the project workspace/i.test(text)) {
+  if (/프로젝트\s*작업\s*공간.*준비|prepar(?:e|ing) the project workspace/i.test(text)) {
     return { phase: 'scaffold', status: 'running', summary: copy.summaries.scaffoldRunning };
   }
-  if (/检测到已有工作区|existing project workspace/i.test(text)) {
+  if (/기존.*작업\s*공간|existing project workspace/i.test(text)) {
     return { phase: 'scaffold', status: 'done', summary: copy.summaries.scaffoldExisting };
   }
-  if (/已准备空项目工作区|empty project workspace/i.test(text)) {
+  if (/빈\s*프로젝트\s*작업\s*공간|empty project workspace/i.test(text)) {
     return { phase: 'scaffold', status: 'done', summary: copy.summaries.scaffoldCreated };
   }
-  if (/自动修复|验证失败|auto-fix|validation|verification/i.test(text)) {
+  if (/자동\s*수정|검증\s*실패|auto-fix|validation|verification/i.test(text)) {
     return { phase: 'code', status: 'running', summary: copy.summaries.codeAutoFix };
   }
-  if (/已获取预览链接|预览链接已获取|preview link (found|retrieved)/i.test(text)) {
+  if (/미리보기\s*링크.*가져|preview link (found|retrieved)/i.test(text)) {
     return { phase: 'link', status: 'done', summary: copy.summaries.linkDone };
   }
-  if (/预览链接未返回|preview link (was not returned|missing)/i.test(text)) {
+  if (/미리보기\s*링크.*(?:반환되지\s*않|없)|preview link (was not returned|missing)/i.test(text)) {
     return { phase: 'link', status: 'error', summary: copy.summaries.linkMissing };
   }
   return null;
@@ -2019,7 +2243,7 @@ function classifyLogText(text: string, stream: 'stdout' | 'stderr' | 'status', c
     if (isInstallText(text)) {
       return { phase: 'install', status: 'error', summary: compactErrorSummary(text, copy.summaries.installFailed) };
     }
-    if (/preview|预览|8080|3000|proxy|link|链接/i.test(text)) {
+    if (/preview|미리보기|8080|3000|proxy|link|링크/i.test(text)) {
       return { phase: 'link', status: 'error', summary: compactErrorSummary(text, copy.summaries.previewFailed) };
     }
     return { phase: 'code', status: 'error', summary: compactErrorSummary(text, copy.summaries.processFailed) };
@@ -2070,7 +2294,7 @@ function isInstallText(text: string) {
   return (
     isInstallCommand(text)
     || /\b(dependency|dependencies|package install|install failed|failed to install)\b/i.test(text)
-    || /依赖|安装失败/.test(text)
+    || /의존성|설치\s*실패/.test(text)
   );
 }
 
@@ -2536,6 +2760,18 @@ function ArrowIcon() {
       fill="currentColor"
     >
       <path d="M4 4.9 21 12 4 19.1l3.2-6.2L16 12l-8.8-.9L4 4.9Z" />
+    </svg>
+  );
+}
+
+function PaperclipIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24" className="size-4" fill="none" stroke="currentColor" strokeWidth="2">
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M16.5 6.5 8.7 14.3a3 3 0 1 0 4.24 4.24l8.49-8.49a5 5 0 1 0-7.07-7.07L5.5 11.83a7 7 0 1 0 9.9 9.9"
+      />
     </svg>
   );
 }
