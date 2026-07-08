@@ -47,7 +47,11 @@ function getSupabaseConfig(context: any): { url: string; key: string } {
 
 async function sha256Hex(input: string): Promise<string> {
   const data = new TextEncoder().encode(input);
-  const digest = await crypto.subtle.digest('SHA-256', data);
+  // EdgeOne's WebCrypto implementation requires the algorithm as an object
+  // ({ name: 'SHA-256' }) rather than the spec-shorthand string form. Passing
+  // the bare string throws "Parameter 0 type invalid. expect: 'Object' get:
+  // 'undefined'" at runtime (it reads algorithm.name internally).
+  const digest = await crypto.subtle.digest({ name: 'SHA-256' }, data);
   return Array.from(new Uint8Array(digest))
     .map((byte) => byte.toString(16).padStart(2, '0'))
     .join('');

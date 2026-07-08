@@ -32,11 +32,32 @@ function pickEnvValue(context: any, key: string) {
 
 // Convert the shared OpenAI-style tool catalog into Gemini's
 // functionDeclarations shape ({name, description, parameters}, no wrapper).
+// Gemini's parameters schema is a restricted OpenAPI-3 subset: keywords like
+// additionalProperties are not recognized and make the whole request fail
+// with a 400 ("Unknown name additionalProperties ... Cannot find field"), so
+// strip them recursively before sending.
+const UNSUPPORTED_SCHEMA_KEYS = new Set(['additionalProperties', '$schema', 'additionalItems']);
+
+function sanitizeGeminiSchema(schema: unknown): unknown {
+  if (Array.isArray(schema)) {
+    return schema.map(sanitizeGeminiSchema);
+  }
+  if (schema && typeof schema === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(schema as Record<string, unknown>)) {
+      if (UNSUPPORTED_SCHEMA_KEYS.has(key)) continue;
+      out[key] = sanitizeGeminiSchema(value);
+    }
+    return out;
+  }
+  return schema;
+}
+
 function toGeminiFunctionDeclarations() {
   return GROQ_TOOLS.map((tool) => ({
     name: tool.function.name,
     description: tool.function.description,
-    parameters: tool.function.parameters,
+    parameters: sanitizeGeminiSchema(tool.function.parameters),
   }));
 }
 
