@@ -85,7 +85,12 @@ async function supabaseFetch(
   init: RequestInit = {},
 ): Promise<Response> {
   const { url, key } = getSupabaseConfig(context);
-  const headers = new Headers(init.headers);
+  // EdgeOne's runtime appears to validate constructor args strictly and
+  // does not treat an explicitly-passed `undefined` the same as an omitted
+  // argument — GET calls below never pass `init.headers`, so this was
+  // `new Headers(undefined)`, which threw "Parameter 0 type invalid.
+  // expect: 'Object' get: 'undefined'". Always pass a concrete object.
+  const headers = new Headers(init.headers || {});
   headers.set('apikey', key);
   headers.set('Authorization', `Bearer ${key}`);
   if (!headers.has('content-type') && init.body) {
