@@ -18,6 +18,7 @@ import {
   type SavedUploadedFile,
   type UploadedFileInput,
 } from './_project';
+import { autoSaveProjectSnapshot, restoreProjectSnapshotIfEmpty } from './_projectStore';
 import type {
   AgentProgressEvent,
   BuildStatus,
@@ -352,6 +353,56 @@ export async function runFileReadPipeline(context: any): Promise<Response> {
   );
 }
 
+// Loads everything needed to resume a saved project when the user clicks it
+// in the sidebar: chat history (already durable via context.store), the
+// live/known preview + build state, and the file tree — restoring the saved
+// Supabase snapshot into the sandbox first if this sandbox instance came up
+// empty. conversationId comes from the same headers /chat and /file use;
+// userId is required (this endpoint only serves signed-in users' own saved
+// projects).
+export async function runProjectDetailPipeline(context: any): Promise<Response> {
+  const contextConversationId = String(context.conversation_id || '');
+  const pagesHeaderConversationId = getRequestHeader(context, 'makers-conversation-id');
+  const headerConversationId = getRequestHeader(context, 'conversationId');
+  const conversationId = contextConversationId || pagesHeaderConversationId || headerConversationId;
+  const body = context?.request?.body || {};
+  const userId = typeof body?.userId === 'string' ? body.userId.trim() : '';
+
+  const jsonError = (error: string, status = 400) => new Response(
+    JSON.stringify({ ok: false, error }),
+    { status, headers: { 'content-type': 'application/json; charset=utf-8' } },
+  );
+
+  if (!conversationId) {
+    return jsonError('missing conversation_id');
+  }
+  if (!userId) {
+    return jsonError('로그인이 필요합니다.', 401);
+  }
+
+  const state = await getProjectState(context, conversationId);
+  await restoreProjectSnapshotIfEmpty(context, conversationId, userId, state);
+
+  const [history, tree] = await Promise.all([
+    getHistory(context, conversationId),
+    getFileTree(context, state).catch(() => [] as FileTreeItem[]),
+  ]);
+
+  return new Response(
+    JSON.stringify({
+      ok: true,
+      conversation_id: conversationId,
+      history,
+      files: { root: state.appDir, items: tree },
+      preview: {
+        url: state.previewUrl,
+        sandboxDebugUrl: state.sandboxDebugUrl,
+      },
+    }),
+    { headers: { 'content-type': 'application/json; charset=utf-8' } },
+  );
+}
+
 export async function runProjectDownloadPipeline(context: any): Promise<Response> {
   const contextConversationId = String(context.conversation_id || '');
   const pagesHeaderConversationId = getRequestHeader(context, 'makers-conversation-id');
@@ -502,6 +553,11 @@ export async function runChatPipeline(
     : await getProjectState(context, conversationId);
   if (shouldResetProject) {
     await resetProjectWorkspace(context, state);
+  } else if (loggedInUserId) {
+    // This conversation's sandbox instance may have been recycled since the
+    // user's last visit; silently rehydrate their saved files before the
+    // agent looks at the workspace.
+    await restoreProjectSnapshotIfEmpty(context, conversationId, loggedInUserId, state);
   }
   const history = shouldResetProject ? [] : await getHistory(context, conversationId);
   const isInitialProjectTurn = !state.created;
@@ -654,6 +710,9 @@ export async function runChatPipeline(
     await appendTurn(context, conversationId, 'assistant', assistantReply);
     logHistory('assistant', assistantReply, {});
     await saveProjectState(context, conversationId, state);
+    if (loggedInUserId) {
+      await autoSaveProjectSnapshot(context, conversationId, loggedInUserId, state, effectiveMessage);
+    }
 
     send({
       type: 'result',
@@ -688,6 +747,9 @@ export async function runChatPipeline(
     await appendTurn(context, conversationId, 'assistant', assistantReply);
     logHistory('assistant', assistantReply, {});
     await saveProjectState(context, conversationId, state);
+    if (loggedInUserId) {
+      await autoSaveProjectSnapshot(context, conversationId, loggedInUserId, state, effectiveMessage);
+    }
 
     send({
       type: 'result',
@@ -741,6 +803,9 @@ export async function runChatPipeline(
     await appendTurn(context, conversationId, 'assistant', fatalReply);
     logHistory('assistant', fatalReply, {});
     await saveProjectState(context, conversationId, state);
+    if (loggedInUserId) {
+      await autoSaveProjectSnapshot(context, conversationId, loggedInUserId, state, effectiveMessage);
+    }
 
     send({
       type: 'result',
@@ -819,6 +884,9 @@ export async function runChatPipeline(
       await appendTurn(context, conversationId, 'assistant', fatalReply);
       logHistory('assistant', fatalReply, {});
       await saveProjectState(context, conversationId, state);
+      if (loggedInUserId) {
+        await autoSaveProjectSnapshot(context, conversationId, loggedInUserId, state, effectiveMessage);
+      }
 
       send({
         type: 'result',
@@ -888,6 +956,9 @@ export async function runChatPipeline(
   await appendTurn(context, conversationId, 'assistant', reply);
   logHistory('assistant', reply, {});
   await saveProjectState(context, conversationId, state);
+  if (loggedInUserId) {
+    await autoSaveProjectSnapshot(context, conversationId, loggedInUserId, state, effectiveMessage);
+  }
 
   send({
     type: 'result',

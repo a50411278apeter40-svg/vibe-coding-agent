@@ -73,6 +73,13 @@ type AuthUser = {
   name: string;
 };
 
+type ProjectListItem = {
+  id: string;
+  conversationId: string;
+  title: string;
+  updatedAt: string;
+};
+
 type FileTreeItem = {
   path: string;
   name: string;
@@ -285,6 +292,17 @@ const TRANSLATIONS = {
       removeFile: '제거',
       errorGeneric: '파일을 읽는 중 오류가 발생했어요.',
     },
+    sidebar: {
+      title: '내 프로젝트',
+      newProject: '새 프로젝트',
+      empty: '아직 저장된 프로젝트가 없어요.',
+      loginRequired: '로그인하면 프로젝트가 자동 저장돼요.',
+      loading: '불러오는 중...',
+      loadFailed: '프로젝트를 불러오지 못했어요.',
+      untitled: '이름 없는 프로젝트',
+      openSidebarAria: '사이드바 열기',
+      closeSidebarAria: '사이드바 닫기',
+    },
   },
   en: {
     languageToggleLabel: '한국어',
@@ -399,6 +417,17 @@ const TRANSLATIONS = {
       attachAria: 'Attach files',
       removeFile: 'Remove',
       errorGeneric: 'Something went wrong while reading the file.',
+    },
+    sidebar: {
+      title: 'My projects',
+      newProject: 'New project',
+      empty: 'No saved projects yet.',
+      loginRequired: 'Log in to auto-save your projects.',
+      loading: 'Loading...',
+      loadFailed: 'Failed to load projects.',
+      untitled: 'Untitled project',
+      openSidebarAria: 'Open sidebar',
+      closeSidebarAria: 'Close sidebar',
     },
   },
 } as const;
@@ -578,6 +607,11 @@ export default function Home() {
   const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
   const [attachError, setAttachError] = useState<string | null>(null);
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+  const [projects, setProjects] = useState<ProjectListItem[]>([]);
+  const [projectsLoading, setProjectsLoading] = useState(false);
+  const [projectsError, setProjectsError] = useState<string | null>(null);
+  const [activeProjectConversationId, setActiveProjectConversationId] = useState<string | null>(null);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [activePreviewUrl, setActivePreviewUrl] = useState('');
   const [activePreviewRevision, setActivePreviewRevision] = useState(0);
@@ -618,6 +652,133 @@ export default function Home() {
   useEffect(() => {
     setAuthUser(getCachedAuthUser());
   }, []);
+
+  const refreshProjects = async (userId: string) => {
+    if (!userId) {
+      setProjects([]);
+      return;
+    }
+    setProjectsLoading(true);
+    setProjectsError(null);
+    try {
+      const response = await fetch('/projects/list', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ userId }),
+      });
+      const data = (await response.json().catch(() => null)) as
+        | { ok?: boolean; projects?: ProjectListItem[]; error?: string }
+        | null;
+      if (!response.ok || !data?.ok) {
+        setProjectsError(data?.error || t.sidebar.loadFailed);
+        return;
+      }
+      setProjects(data.projects || []);
+    } catch {
+      setProjectsError(t.sidebar.loadFailed);
+    } finally {
+      setProjectsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (authUser) {
+      void refreshProjects(authUser.id);
+    } else {
+      setProjects([]);
+      setActiveProjectConversationId(null);
+    }
+    // Only re-run when the signed-in user actually changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authUser?.id]);
+
+  function resetWorkspaceView() {
+    setPreview(null);
+    setDownload(null);
+    setBuild(null);
+    setFileTree(null);
+    setFilesRefreshing(false);
+    setSandboxTab('preview');
+    activePreviewUrlRef.current = '';
+    activePreviewRevisionRef.current = 0;
+    previewRevisionRef.current = 0;
+    setActivePreviewUrl('');
+    setActivePreviewRevision(0);
+    setActivePreviewLoaded(false);
+    setPendingPreviewUrl('');
+    setPendingPreviewRevision(0);
+  }
+
+  function startNewProject() {
+    const next = createConversationId();
+    cacheConversationId(next);
+    setConversationId(next);
+    setActiveProjectConversationId(null);
+    setMessages([]);
+    resetWorkspaceView();
+    setSidebarOpen(false);
+  }
+
+  async function loadProject(project: ProjectListItem) {
+    if (!authUser || loading) return;
+    setSidebarOpen(false);
+    setActiveProjectConversationId(project.conversationId);
+    setLoading(true);
+    try {
+      const response = await fetch('/projectDetail', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          conversationId: project.conversationId,
+          'makers-conversation-id': project.conversationId,
+        },
+        body: JSON.stringify({ userId: authUser.id }),
+      });
+      const data = (await response.json().catch(() => null)) as
+        | {
+            ok?: boolean;
+            history?: { role: 'user' | 'assistant'; content: string }[];
+            files?: FileTree;
+            preview?: LinkInfo;
+            error?: string;
+          }
+        | null;
+      if (!response.ok || !data?.ok) {
+        setProjectsError(data?.error || t.sidebar.loadFailed);
+        setActiveProjectConversationId(null);
+        return;
+      }
+
+      cacheConversationId(project.conversationId);
+      setConversationId(project.conversationId);
+      resetWorkspaceView();
+
+      const restoredMessages: ChatMessage[] = (data.history || []).map((item, index) => ({
+        id: `${project.conversationId}-${index}-${item.role}`,
+        role: item.role,
+        content: item.content,
+        status: 'done',
+      }));
+      setMessages(restoredMessages);
+
+      if (data.files && data.files.items.length > 0) {
+        setFileTree(data.files);
+        setDownload({ url: '/download', filename: 'source.zip' });
+      }
+      if (data.preview?.url) {
+        setPreview(data.preview);
+        activePreviewUrlRef.current = data.preview.url;
+        setActivePreviewUrl(data.preview.url);
+        setActivePreviewRevision((current) => current + 1);
+        setActivePreviewLoaded(false);
+      }
+    } catch {
+      setProjectsError(t.sidebar.loadFailed);
+      setActiveProjectConversationId(null);
+    } finally {
+      setLoading(false);
+    }
+  }
 
   useEffect(() => {
     document.documentElement.lang = language === 'ko' ? 'ko' : 'en';
@@ -691,20 +852,8 @@ export default function Home() {
     if (isStartingFromHome) {
       cacheConversationId(requestConversationId);
       setConversationId(requestConversationId);
-      setPreview(null);
-      setDownload(null);
-      setBuild(null);
-      setFileTree(null);
-      setFilesRefreshing(false);
-      setSandboxTab('preview');
-      activePreviewUrlRef.current = '';
-      activePreviewRevisionRef.current = 0;
-      previewRevisionRef.current = 0;
-      setActivePreviewUrl('');
-      setActivePreviewRevision(0);
-      setActivePreviewLoaded(false);
-      setPendingPreviewUrl('');
-      setPendingPreviewRevision(0);
+      setActiveProjectConversationId(null);
+      resetWorkspaceView();
     } else if (!conversationId) {
       setConversationId(requestConversationId);
     }
@@ -1095,6 +1244,9 @@ export default function Home() {
       });
       setLoading(false);
       setFilesRefreshing(false);
+      if (authUser) {
+        void refreshProjects(authUser.id);
+      }
     }
   }
 
@@ -1189,10 +1341,88 @@ export default function Home() {
         }}
         className="hidden"
       />
-      <nav className="fixed inset-x-0 top-0 z-50 px-4">
+      {sidebarOpen && (
+        <button
+          type="button"
+          aria-label={t.sidebar.closeSidebarAria}
+          onClick={() => setSidebarOpen(false)}
+          className="fixed inset-0 z-40 bg-black/50"
+        />
+      )}
+      <aside
+        className={`fixed inset-y-0 left-0 z-50 flex w-[280px] max-w-[82vw] flex-col border-r border-white/10 bg-[#0f1310] shadow-2xl transition-transform duration-200 ${
+          sidebarOpen ? 'translate-x-0' : '-translate-x-full'
+        }`}
+      >
+        <div className="flex items-center justify-between gap-2 border-b border-white/10 px-4 py-4">
+          <span className="text-sm font-semibold tracking-wide text-[#dff8ef]">{t.sidebar.title}</span>
+          <button
+            type="button"
+            aria-label={t.sidebar.closeSidebarAria}
+            onClick={() => setSidebarOpen(false)}
+            className="rounded-full border border-white/10 px-2 py-1 text-xs text-[#b5c4be] transition hover:border-white/25 hover:text-white"
+          >
+            ✕
+          </button>
+        </div>
+        <div className="px-4 pt-4">
+          <button
+            type="button"
+            onClick={startNewProject}
+            className="w-full rounded-xl bg-[#45b98e] px-3 py-2 text-sm font-semibold text-black shadow-lg shadow-[#45b98e]/20 transition hover:bg-[#56c99f]"
+          >
+            + {t.sidebar.newProject}
+          </button>
+        </div>
+        <div className="mt-3 flex-1 overflow-y-auto px-2 pb-4">
+          {!authUser ? (
+            <p className="px-2 py-6 text-center text-xs leading-relaxed text-[#8a9a93]">
+              {t.sidebar.loginRequired}
+            </p>
+          ) : projectsLoading && projects.length === 0 ? (
+            <p className="px-2 py-6 text-center text-xs text-[#8a9a93]">{t.sidebar.loading}</p>
+          ) : projectsError ? (
+            <p className="px-2 py-6 text-center text-xs text-[#f2a0a0]">{projectsError}</p>
+          ) : projects.length === 0 ? (
+            <p className="px-2 py-6 text-center text-xs text-[#8a9a93]">{t.sidebar.empty}</p>
+          ) : (
+            <ul className="flex flex-col gap-1">
+              {projects.map((project) => (
+                <li key={project.id}>
+                  <button
+                    type="button"
+                    onClick={() => void loadProject(project)}
+                    className={`w-full truncate rounded-lg px-3 py-2 text-left text-sm transition ${
+                      activeProjectConversationId === project.conversationId
+                        ? 'bg-[#1c2620] text-[#dff8ef]'
+                        : 'text-[#b5c4be] hover:bg-white/5 hover:text-white'
+                    }`}
+                    title={project.title || t.sidebar.untitled}
+                  >
+                    {project.title || t.sidebar.untitled}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </aside>
+      <nav className="fixed inset-x-0 top-0 z-30 px-4">
         <div className="mx-auto flex h-14 items-center justify-between gap-3">
-          <div className="min-w-0 text-sm font-semibold tracking-[0.06em] text-[#dff8ef] sm:text-base">
-            <span className="truncate">PIXAL2.0</span>
+          <div className="flex min-w-0 items-center gap-2">
+            <button
+              type="button"
+              aria-label={t.sidebar.openSidebarAria}
+              onClick={() => setSidebarOpen(true)}
+              className="rounded-full border border-white/15 bg-[#141917]/90 p-2 text-[#dff8ef] shadow-lg shadow-black/20 transition hover:border-[#7bd8b4]"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M4 6H20M4 12H20M4 18H20" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+              </svg>
+            </button>
+            <div className="min-w-0 text-sm font-semibold tracking-[0.06em] text-[#dff8ef] sm:text-base">
+              <span className="truncate">PIXAL2.0</span>
+            </div>
           </div>
           <div className="flex shrink-0 items-center gap-2">
             <a
