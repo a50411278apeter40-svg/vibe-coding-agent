@@ -1,4 +1,5 @@
-import { runCodingAgent, type ImageAttachment } from './_agent';
+import type { ImageAttachment } from './_agent';
+import { runGemmaCodingAgent } from './_gemmaAgent';
 import { AUTO_FIX_MAX_ATTEMPTS } from './_constants';
 import {
   appendTurn,
@@ -493,7 +494,9 @@ export async function runChatPipeline(
     message: 'Running the agent workflow',
   });
 
-  const shouldResetProject = options.resetProject === true;
+  // Anonymous (not logged-in) users never get a persistent sandbox: force a
+  // fresh project workspace every turn so nothing survives after they leave.
+  const shouldResetProject = options.resetProject === true || !loggedInUserId;
   const state = shouldResetProject
     ? createProjectState(conversationId)
     : await getProjectState(context, conversationId);
@@ -611,7 +614,7 @@ export async function runChatPipeline(
     }
   }
 
-  const modelResult = await runCodingAgent(
+  const modelResult = await runGemmaCodingAgent(
     context,
     conversationId,
     effectiveMessage,
@@ -776,7 +779,7 @@ export async function runChatPipeline(
       1,
       AUTO_FIX_MAX_ATTEMPTS,
     );
-    const autoFixResult = await runCodingAgent(
+    const autoFixResult = await runGemmaCodingAgent(
       context,
       conversationId,
       autoFixPrompt,
