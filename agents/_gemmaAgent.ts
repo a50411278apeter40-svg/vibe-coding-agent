@@ -63,7 +63,14 @@ async function callGemmaStreaming(
       contents,
       systemInstruction: { role: 'system', parts: [{ text: systemInstruction }] },
       tools: [{ functionDeclarations: toGeminiFunctionDeclarations() }],
-      generationConfig: { temperature: 0.3 },
+      // thinkingLevel 'minimal' keeps the tool-calling loop fast and cheap —
+      // this agent calls the model many times per turn, and Gemma 4's internal
+      // reasoning tokens (returned as separate thought:true parts, filtered out
+      // below regardless) would otherwise multiply latency and token usage.
+      generationConfig: {
+        temperature: 0.3,
+        thinkingConfig: { thinkingLevel: 'minimal' },
+      },
     }),
   });
 
@@ -102,6 +109,9 @@ async function callGemmaStreaming(
       const parts = candidate.content?.parts;
       if (Array.isArray(parts)) {
         for (const part of parts) {
+          // Gemma 4's internal reasoning is returned as separate parts marked
+          // thought:true — never stream or accumulate those as the answer.
+          if (part.thought === true) continue;
           if (typeof part.text === 'string' && part.text.length > 0) {
             text += part.text;
             onTextDelta(part.text);
