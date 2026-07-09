@@ -47,7 +47,11 @@ export const PREVIEW_BINARY_EXTENSIONS = new Set([
   '.lock',
 ]);
 
-export const PREVIEW_MAX_BYTES = 256 * 1024;
+// Effectively unlimited: readFileFromSandbox() feeds this into a shell
+// `head -c <n>` command, which needs a real finite byte count (not
+// Infinity), so this is set to a very high ceiling (50MB) rather than a
+// literal cap -- no real project source file will ever hit it.
+export const PREVIEW_MAX_BYTES = 50 * 1024 * 1024;
 
 export const FILE_TREE_IGNORED_DIRECTORIES = [
   'node_modules',

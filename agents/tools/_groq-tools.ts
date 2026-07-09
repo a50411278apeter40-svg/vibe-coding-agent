@@ -175,7 +175,9 @@ export const GROQ_TOOLS: GroqToolSpec[] = [
   },
 ];
 
-const WEB_FETCH_MAX_CHARS = 20000;
+// Unlimited: rawText.slice(0, Infinity) returns the full string, so
+// web_fetch results are no longer clipped before being handed back to Gemma.
+const WEB_FETCH_MAX_CHARS = Infinity;
 const WEB_FETCH_TIMEOUT_MS = 15000;
 
 type ExecutorDeps = {

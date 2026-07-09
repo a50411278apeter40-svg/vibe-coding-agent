@@ -19,6 +19,7 @@ import {
   type UploadedFileInput,
 } from './_project';
 import { autoSaveProjectSnapshot, restoreProjectSnapshotIfEmpty } from './_projectStore';
+import { createDaytonaSandboxAdapter } from './_daytonaSandbox';
 import type {
   AgentProgressEvent,
   BuildStatus,
@@ -30,12 +31,6 @@ import { buildAutoFixPrompt } from './utils/_build-errors';
 import { debugLog } from './utils/_debug';
 import { normalizeRelPath } from './utils/_paths';
 import { sanitizeAssistantText } from './utils/_text';
-
-const SANDBOX_EXTENSION_SECONDS = 1800;
-
-type SandboxWithTimeoutExtension = {
-  extendTimeout?: (seconds: number) => unknown;
-};
 
 function stripReturnedPreviewLinks(text: string, previewUrl?: string) {
   if (!text || !previewUrl) {
@@ -258,24 +253,26 @@ function maskConversationId(value: string): string {
   return `${value.slice(0, 6)}...${value.slice(-6)}`;
 }
 
-async function extendExistingSandboxTimeout(context: any) {
-  const sandbox = context?.sandbox as SandboxWithTimeoutExtension | undefined;
-  if (!sandbox || typeof sandbox.extendTimeout !== 'function') {
-    return;
-  }
-
+async function attachDaytonaSandbox(
+  context: any,
+  conversationId: string,
+  existingSandboxId?: string | null,
+): Promise<string | undefined> {
   try {
-    await sandbox.extendTimeout(SANDBOX_EXTENSION_SECONDS);
+    const adapter = await createDaytonaSandboxAdapter(conversationId, existingSandboxId);
+    context.sandbox = adapter;
     debugLog(context, '[sandbox]', {
-      stage: 'extend-timeout',
-      seconds: SANDBOX_EXTENSION_SECONDS,
+      stage: 'daytona-attached',
+      sandboxId: adapter.id,
+      reused: Boolean(existingSandboxId && existingSandboxId === adapter.id),
     });
+    return adapter.id;
   } catch (error) {
     console.warn('[sandbox]', {
-      stage: 'extend-timeout-failed',
-      seconds: SANDBOX_EXTENSION_SECONDS,
+      stage: 'daytona-attach-failed',
       error: error instanceof Error ? error.message : String(error || ''),
     });
+    return existingSandboxId || undefined;
   }
 }
 
@@ -328,6 +325,7 @@ export async function runFileReadPipeline(context: any): Promise<Response> {
   }
 
   const state = await getProjectState(context, conversationId);
+  state.daytonaSandboxId = await attachDaytonaSandbox(context, conversationId, state.daytonaSandboxId);
   debugLog(context, '[file-read]', {
     ...diagnosticBase,
     rawPath: relPath,
@@ -381,7 +379,9 @@ export async function runProjectDetailPipeline(context: any): Promise<Response> 
   }
 
   const state = await getProjectState(context, conversationId);
+  state.daytonaSandboxId = await attachDaytonaSandbox(context, conversationId, state.daytonaSandboxId);
   await restoreProjectSnapshotIfEmpty(context, conversationId, userId, state);
+  await saveProjectState(context, conversationId, state);
 
   const [history, tree] = await Promise.all([
     getHistory(context, conversationId),
@@ -426,6 +426,7 @@ export async function runProjectDownloadPipeline(context: any): Promise<Response
   }
 
   const state = await getProjectState(context, conversationId);
+  state.daytonaSandboxId = await attachDaytonaSandbox(context, conversationId, state.daytonaSandboxId);
 
   let archive;
   try {
@@ -538,8 +539,6 @@ export async function runChatPipeline(
     return;
   }
 
-  await extendExistingSandboxTimeout(context);
-
   send({
     type: 'status',
     message: 'Running the agent workflow',
@@ -551,6 +550,11 @@ export async function runChatPipeline(
   const state = shouldResetProject
     ? createProjectState(conversationId)
     : await getProjectState(context, conversationId);
+  state.daytonaSandboxId = await attachDaytonaSandbox(
+    context,
+    conversationId,
+    shouldResetProject ? undefined : state.daytonaSandboxId,
+  );
   if (shouldResetProject) {
     await resetProjectWorkspace(context, state);
   } else if (loggedInUserId) {

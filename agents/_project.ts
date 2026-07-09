@@ -346,22 +346,23 @@ export async function getFileTree(context: any, state: ProjectState): Promise<Fi
 }
 
 export async function resolvePublicLinks(context: any) {
-  const previewHost = context.sandbox.getHost(PREVIEW_PUBLIC_PORT);
-  const accessToken = context.sandbox.envdAccessToken;
-  const previewBaseUrl = normalizePublicUrl(previewHost);
-  const sandboxDebugUrl = normalizePublicUrl(context.sandbox.browser?.liveUrl);
+  // Daytona's signed preview URL embeds its auth token directly in the host
+  // (https://{port}-{token}.proxy.daytona.work), so unlike the old
+  // getHost()+envdAccessToken+query-param scheme, there is nothing left to
+  // assemble here — it's already a ready-to-embed iframe URL. 1 hour expiry
+  // is refreshed every time this is called (each chat turn), which is
+  // comfortably more often than a user sits on one preview without acting.
+  const previewUrl = typeof context.sandbox.getSignedPreviewUrl === 'function'
+    ? await context.sandbox.getSignedPreviewUrl(PREVIEW_PUBLIC_PORT, 3600)
+    : undefined;
+  // No Daytona equivalent to E2B's desktop/browser live debug view.
+  const sandboxDebugUrl = undefined;
   debugLog(context, '[preview-link]', {
     internalPort: PREVIEW_SERVER_PORT,
     publicPort: PREVIEW_PUBLIC_PORT,
-    proxyPath: PREVIEW_PATH_PREFIX,
-    hasPreviewHost: Boolean(previewBaseUrl),
-    hasEnvdAccessToken: Boolean(accessToken),
+    hasPreviewHost: Boolean(previewUrl),
     hasSandboxDebugUrl: Boolean(sandboxDebugUrl),
   });
-
-  const previewUrl = (previewBaseUrl && accessToken)
-    ? buildPublicPreviewUrl(previewBaseUrl, accessToken)
-    : undefined;
 
   return {
     previewUrl,
@@ -408,9 +409,26 @@ function appendAccessToken(url: string, token: string) {
   }
 }
 
-function resolvePreviewAllowedHost(context: any) {
+async function resolvePreviewAllowedHost(context: any): Promise<string> {
   try {
-    const previewHost = context.sandbox.getHost(PREVIEW_PUBLIC_PORT);
+    // Daytona's signed preview URL embeds a per-call token as the leftmost
+    // hostname label (e.g. https://3000-<token>.<daytona-proxy-domain>),
+    // which rotates every time resolvePublicLinks() is called. Rather than
+    // race to keep the dev server's allowed-hosts config in sync with a
+    // moving target, derive a wildcard for the base proxy domain from one
+    // real signed URL instead of hardcoding it (Daytona's own proxy still
+    // gates access on the rotating token before a request ever reaches this
+    // dev server, so this is a redundant second check, not the only one).
+    if (typeof context.sandbox.getSignedPreviewUrl === 'function') {
+      const sampleUrl = await context.sandbox.getSignedPreviewUrl(PREVIEW_PUBLIC_PORT, 60);
+      const hostname = sampleUrl ? new URL(sampleUrl).hostname : '';
+      const labels = hostname.split('.');
+      if (labels.length > 1) {
+        return `.${labels.slice(1).join('.')}`;
+      }
+      return '';
+    }
+    const previewHost = context.sandbox.getHost?.(PREVIEW_PUBLIC_PORT);
     const previewUrl = normalizePublicUrl(previewHost);
     if (!previewUrl) {
       return '';
@@ -425,15 +443,15 @@ export function shellQuote(value: string) {
   return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
-function buildViteAllowedHostEnvPrefix(context: any) {
-  const allowedHost = resolvePreviewAllowedHost(context);
+async function buildViteAllowedHostEnvPrefix(context: any) {
+  const allowedHost = await resolvePreviewAllowedHost(context);
   return allowedHost
     ? `env __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=${shellQuote(allowedHost)} `
     : '';
 }
 
-function buildFrontendPreviewEnvPrefix(context: any) {
-  const allowedHost = resolvePreviewAllowedHost(context);
+async function buildFrontendPreviewEnvPrefix(context: any) {
+  const allowedHost = await resolvePreviewAllowedHost(context);
   return [
     `EDGEONE_PREVIEW_BASE_PATH=${shellQuote(PREVIEW_PATH_PREFIX.replace(/\/$/, ''))}`,
     allowedHost ? `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=${shellQuote(allowedHost)}` : '',
@@ -645,8 +663,8 @@ async function detectPreviewStartCommand(
     const scripts = metadata.scripts || {};
     const deps = metadata.deps || {};
     const scriptText = Object.values(scripts).join(' ');
-    const frontendPreviewEnv = buildFrontendPreviewEnvPrefix(context);
-    const viteAllowedHostEnv = buildViteAllowedHostEnvPrefix(context);
+    const frontendPreviewEnv = await buildFrontendPreviewEnvPrefix(context);
+    const viteAllowedHostEnv = await buildViteAllowedHostEnvPrefix(context);
 
     if (deps.next || /\bnext\b/.test(scriptText)) {
       await assertNextPreviewConfig(context, state);

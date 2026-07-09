@@ -8,6 +8,10 @@ export type ProjectState = {
   appDir: string;
   previewUrl?: string;
   sandboxDebugUrl?: string;
+  // Persisted across turns (via context.store's conversation metadata) so a
+  // signed-in user's next message reconnects to the SAME Daytona sandbox
+  // instead of paying for a brand-new one every time. See _daytonaSandbox.ts.
+  daytonaSandboxId?: string;
 };
 
 export type ConversationMessage = {

@@ -21,9 +21,12 @@ import { debugLog } from './utils/_debug';
 
 const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 export const DEFAULT_GEMMA_MODEL = 'gemma-4-31b-it';
-const MAX_TOOL_ITERATIONS = 24;
-const TOOL_RESULT_PREVIEW_LIMIT = 4000;
-const TOOL_RESULT_CONTEXT_LIMIT = 6000;
+const MAX_TOOL_ITERATIONS = 80;
+// Unlimited tool-output reading: truncateForStream() treats Infinity as "no
+// cap" (text.length <= Infinity is always true), so both the UI preview and
+// what Gemma reads back into its own context are no longer clipped.
+const TOOL_RESULT_PREVIEW_LIMIT = Infinity;
+const TOOL_RESULT_CONTEXT_LIMIT = Infinity;
 
 function pickEnvValue(context: any, key: string) {
   const value = context?.env?.[key] ?? (typeof process !== 'undefined' ? process.env?.[key] : undefined);
