@@ -1,0 +1,43 @@
+# Render Blueprint for this app (https://render.com/docs/blueprint-spec).
+#
+# This project no longer depends on EdgeOne's own "agents" framework or its
+# sandbox runtime -- every previously EdgeOne-specific endpoint (/chat,
+# /file, /projectDetail, /download, /auth/login, /auth/signup,
+# /projects/list) is now a plain Next.js Route Handler (see app/**/route.ts),
+# so it runs as an ordinary Node web service anywhere, including here.
+#
+# One-time setup after connecting this repo on Render:
+#   1. In the Render dashboard, set the environment variables listed below
+#      under this service's Environment tab (they're marked sync: false so
+#      Render will prompt for them instead of committing secrets to git).
+#   2. Run agents/_lib/conversations-schema.sql (plus the existing
+#      edge-functions/_lib/users-schema.sql and _lib/projects-schema.sql if
+#      not already applied) once in your Supabase project's SQL editor.
+#   3. Deploy. Render will run `npm install && npm run build` then
+#      `npm run start`, which binds to the $PORT Render provides.
+
+services:
+  - type: web
+    name: pixal2-web
+    runtime: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm run start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      # AI provider keys (free tiers): Gemma 4 via Gemini API, and Groq.
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      # Daytona sandbox (free, no credit card) -- actual code-execution sandbox.
+      - key: DAYTONA_API_KEY
+        sync: false
+      # Supabase Postgres -- users, projects, and now conversations/messages
+      # (chat history + project-state metadata, replacing EdgeOne's
+      # context.store; see agents/_contextStore.ts).
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false

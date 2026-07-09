@@ -17,6 +17,11 @@
     "isolatedModules": true,
     "jsx": "react-jsx",
     "incremental": true,
+    "paths": {
+      "@/*": [
+        "./*"
+      ]
+    },
     "plugins": [
       {
         "name": "next"
@@ -34,8 +39,6 @@
     "node_modules",
     "cloud-functions",
     "node-functions",
-    "edge-functions",
-    "agents",
     "functions"
   ]
 }
