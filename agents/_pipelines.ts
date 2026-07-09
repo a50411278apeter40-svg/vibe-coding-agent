@@ -253,26 +253,49 @@ function maskConversationId(value: string): string {
   return `${value.slice(0, 6)}...${value.slice(-6)}`;
 }
 
+// Returns a (possibly wrapped) context plus the resolved sandbox id -- the
+// caller MUST reassign its local `context` variable to the returned one and
+// use that from then on. A plain `context.sandbox = adapter` is not safe:
+// the platform's own `context.sandbox` is a lazy getter-only accessor (it
+// only calls out to EdgeOne's own quota-limited sandbox-acquire API the
+// first time it's actually *read* -- see the runtime's LazySandbox/getClient
+// pattern). If that accessor is non-configurable, a direct assignment either
+// throws (silently swallowed by the try/catch below, leaving the original
+// getter in place) or is a no-op -- either way every later `context.sandbox.*`
+// call would keep falling through to the platform's own sandbox and hit
+// SANDBOX_LIMIT_EXCEEDED, never actually reaching Daytona. Wrapping `context`
+// in a Proxy sidesteps this: it intercepts `sandbox` get/set at the wrapper
+// level regardless of how the underlying property was defined underneath,
+// so it always works, independent of that implementation detail.
 async function attachDaytonaSandbox(
   context: any,
   conversationId: string,
   existingSandboxId?: string | null,
-): Promise<string | undefined> {
+): Promise<{ context: any; sandboxId: string | undefined }> {
   try {
     const adapter = await createDaytonaSandboxAdapter(conversationId, existingSandboxId);
-    context.sandbox = adapter;
-    debugLog(context, '[sandbox]', {
+    const proxied = new Proxy(context, {
+      get(target, prop, receiver) {
+        if (prop === 'sandbox') return adapter;
+        return Reflect.get(target, prop, receiver);
+      },
+      set(target, prop, value, receiver) {
+        if (prop === 'sandbox') return true; // we own this slot now; ignore attempts to reset it
+        return Reflect.set(target, prop, value, receiver);
+      },
+    });
+    debugLog(proxied, '[sandbox]', {
       stage: 'daytona-attached',
       sandboxId: adapter.id,
       reused: Boolean(existingSandboxId && existingSandboxId === adapter.id),
     });
-    return adapter.id;
+    return { context: proxied, sandboxId: adapter.id };
   } catch (error) {
     console.warn('[sandbox]', {
       stage: 'daytona-attach-failed',
       error: error instanceof Error ? error.message : String(error || ''),
     });
-    return existingSandboxId || undefined;
+    return { context, sandboxId: existingSandboxId || undefined };
   }
 }
 
@@ -325,7 +348,11 @@ export async function runFileReadPipeline(context: any): Promise<Response> {
   }
 
   const state = await getProjectState(context, conversationId);
-  state.daytonaSandboxId = await attachDaytonaSandbox(context, conversationId, state.daytonaSandboxId);
+  {
+    const sandboxAttach = await attachDaytonaSandbox(context, conversationId, state.daytonaSandboxId);
+    context = sandboxAttach.context;
+    state.daytonaSandboxId = sandboxAttach.sandboxId;
+  }
   debugLog(context, '[file-read]', {
     ...diagnosticBase,
     rawPath: relPath,
@@ -379,7 +406,11 @@ export async function runProjectDetailPipeline(context: any): Promise<Response> 
   }
 
   const state = await getProjectState(context, conversationId);
-  state.daytonaSandboxId = await attachDaytonaSandbox(context, conversationId, state.daytonaSandboxId);
+  {
+    const sandboxAttach = await attachDaytonaSandbox(context, conversationId, state.daytonaSandboxId);
+    context = sandboxAttach.context;
+    state.daytonaSandboxId = sandboxAttach.sandboxId;
+  }
   await restoreProjectSnapshotIfEmpty(context, conversationId, userId, state);
   await saveProjectState(context, conversationId, state);
 
@@ -426,7 +457,11 @@ export async function runProjectDownloadPipeline(context: any): Promise<Response
   }
 
   const state = await getProjectState(context, conversationId);
-  state.daytonaSandboxId = await attachDaytonaSandbox(context, conversationId, state.daytonaSandboxId);
+  {
+    const sandboxAttach = await attachDaytonaSandbox(context, conversationId, state.daytonaSandboxId);
+    context = sandboxAttach.context;
+    state.daytonaSandboxId = sandboxAttach.sandboxId;
+  }
 
   let archive;
   try {
@@ -550,11 +585,15 @@ export async function runChatPipeline(
   const state = shouldResetProject
     ? createProjectState(conversationId)
     : await getProjectState(context, conversationId);
-  state.daytonaSandboxId = await attachDaytonaSandbox(
-    context,
-    conversationId,
-    shouldResetProject ? undefined : state.daytonaSandboxId,
-  );
+  {
+    const sandboxAttach = await attachDaytonaSandbox(
+      context,
+      conversationId,
+      shouldResetProject ? undefined : state.daytonaSandboxId,
+    );
+    context = sandboxAttach.context;
+    state.daytonaSandboxId = sandboxAttach.sandboxId;
+  }
   if (shouldResetProject) {
     await resetProjectWorkspace(context, state);
   } else if (loggedInUserId) {
