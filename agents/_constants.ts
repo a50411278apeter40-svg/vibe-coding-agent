@@ -1,7 +1,8 @@
-// The app dev server listens on internal port 3000; public previews are exposed
-// through the sandbox nginx reverse proxy on port 9000 under /preview/.
+// The app dev server listens on internal port 3000 under base path /preview/.
+// Daytona's signed preview URL proxies this exact port+path directly (see
+// resolvePublicLinks in _project.ts) -- there is no separate public port/
+// nginx sidecar like the old E2B sandbox template had.
 export const PREVIEW_SERVER_PORT = 3000;
-export const PREVIEW_PUBLIC_PORT = 9000;
 export const PREVIEW_PATH_PREFIX = '/preview/';
 export const HISTORY_FETCH_LIMIT = 50;
 export const AUTO_FIX_MAX_ATTEMPTS = 1;

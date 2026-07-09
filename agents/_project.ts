@@ -2,7 +2,6 @@ import {
   FILE_TREE_IGNORED_DIRECTORIES,
   FILE_TREE_IGNORED_FILENAMES,
   PREVIEW_PATH_PREFIX,
-  PREVIEW_PUBLIC_PORT,
   PREVIEW_SERVER_PORT,
   PREVIEW_BINARY_EXTENSIONS,
   PREVIEW_MAX_BYTES,
@@ -345,21 +344,43 @@ export async function getFileTree(context: any, state: ProjectState): Promise<Fi
     });
 }
 
+// Daytona proxies whatever port you ask for directly (no separate "public
+// port" like the old E2B nginx sidecar on 9000 -- that process doesn't exist
+// in Daytona's plain node:20 image, so requesting it just times out). The
+// dev server itself only listens on PREVIEW_SERVER_PORT, so that's the port
+// we must request a signed URL for. The signed URL Daytona returns is the
+// bare host with no path, but the dev server is configured (see
+// prepareVitePreviewConfig/assertNextPreviewConfig) to serve everything
+// under PREVIEW_PATH_PREFIX, so that path has to be appended here or the
+// proxied request hits the dev server's (unused) root and looks dead.
+function withPreviewPath(rawUrl: string | undefined): string | undefined {
+  if (!rawUrl) return undefined;
+  try {
+    const parsed = new URL(rawUrl);
+    parsed.pathname = PREVIEW_PATH_PREFIX;
+    return parsed.toString();
+  } catch {
+    return rawUrl;
+  }
+}
+
 export async function resolvePublicLinks(context: any) {
   // Daytona's signed preview URL embeds its auth token directly in the host
   // (https://{port}-{token}.proxy.daytona.work), so unlike the old
-  // getHost()+envdAccessToken+query-param scheme, there is nothing left to
-  // assemble here — it's already a ready-to-embed iframe URL. 1 hour expiry
-  // is refreshed every time this is called (each chat turn), which is
-  // comfortably more often than a user sits on one preview without acting.
-  const previewUrl = typeof context.sandbox.getSignedPreviewUrl === 'function'
-    ? await context.sandbox.getSignedPreviewUrl(PREVIEW_PUBLIC_PORT, 3600)
+  // getHost()+envdAccessToken+query-param scheme, there is no token to
+  // assemble by hand -- it's already embedded. We do still need to point it
+  // at the right internal port and append the dev server's preview base
+  // path (see withPreviewPath above). 1 hour expiry is refreshed every time
+  // this is called (each chat turn), which is comfortably more often than a
+  // user sits on one preview without acting.
+  const rawPreviewUrl = typeof context.sandbox.getSignedPreviewUrl === 'function'
+    ? await context.sandbox.getSignedPreviewUrl(PREVIEW_SERVER_PORT, 3600)
     : undefined;
+  const previewUrl = withPreviewPath(rawPreviewUrl);
   // No Daytona equivalent to E2B's desktop/browser live debug view.
   const sandboxDebugUrl = undefined;
   debugLog(context, '[preview-link]', {
     internalPort: PREVIEW_SERVER_PORT,
-    publicPort: PREVIEW_PUBLIC_PORT,
     hasPreviewHost: Boolean(previewUrl),
     hasSandboxDebugUrl: Boolean(sandboxDebugUrl),
   });
@@ -420,7 +441,7 @@ async function resolvePreviewAllowedHost(context: any): Promise<string> {
     // gates access on the rotating token before a request ever reaches this
     // dev server, so this is a redundant second check, not the only one).
     if (typeof context.sandbox.getSignedPreviewUrl === 'function') {
-      const sampleUrl = await context.sandbox.getSignedPreviewUrl(PREVIEW_PUBLIC_PORT, 60);
+      const sampleUrl = await context.sandbox.getSignedPreviewUrl(PREVIEW_SERVER_PORT, 60);
       const hostname = sampleUrl ? new URL(sampleUrl).hostname : '';
       const labels = hostname.split('.');
       if (labels.length > 1) {
@@ -428,7 +449,7 @@ async function resolvePreviewAllowedHost(context: any): Promise<string> {
       }
       return '';
     }
-    const previewHost = context.sandbox.getHost?.(PREVIEW_PUBLIC_PORT);
+    const previewHost = context.sandbox.getHost?.(PREVIEW_SERVER_PORT);
     const previewUrl = normalizePublicUrl(previewHost);
     if (!previewUrl) {
       return '';
@@ -631,7 +652,6 @@ export async function startPreviewServer(context: any, state: ProjectState) {
 
   return {
     port,
-    publicPort: PREVIEW_PUBLIC_PORT,
     proxyPath: PREVIEW_PATH_PREFIX,
     framework: start.framework,
     command: start.command,
