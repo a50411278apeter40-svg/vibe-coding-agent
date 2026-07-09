@@ -1,6 +1,5 @@
 {
   "agents": {
-    "framework": "claude-agent-sdk",
     "timeout": 1800
   },
   "cloudFunctions": {
