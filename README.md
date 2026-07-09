@@ -103,7 +103,7 @@ The agent runs in session mode under `agents/`. Requests with the same `conversa
 6. **Verification** — the runtime runs `npm run build` when a Node project has a build script, or `python -m compileall .` when Python files are present. If verification fails after a successful agent run, the pipeline attempts one auto-fix pass.
 7. **Response stream** — the frontend receives status events, logs, tool calls, tool results, file tree updates, the preview URL, build status, and the final assistant reply as newline-delimited JSON.
 
-The file route is `/file?path=<relative-path>` and uses the same conversation context to read text files from the temporary sandbox project. Sandbox credentials are provided by the runtime; no local sandbox credentials are required. The sandbox and generated code are temporary, and their lifetime is controlled by `agents.sandbox.timeout` in `edgeone.json`, currently set to `1800` seconds.
+The file route is `/file?path=<relative-path>` and uses the same conversation context to read text files from the temporary sandbox project. The sandbox now runs on the user's own Daytona account (see `agents/_daytonaSandbox.ts`), authenticated via the `DAYTONA_API_KEY` secret -- not the platform's built-in agent sandbox, which was removed from `edgeone.json` because its shared monthly GB-s quota could be exhausted independently of this project's own usage. Signed-in users reuse the same Daytona sandbox across turns (id stored on `ProjectState.daytonaSandboxId`); anonymous users get a fresh one every turn and nothing persists after they leave.
 
 ## Resources
 
