@@ -8,12 +8,12 @@
 // back, and repeat until the model returns a final answer with no more tool
 // calls.
 import { GROQ_TOOLS, executeGroqTool } from './tools/_groq-tools';
-import type { ImageAttachment } from './_agent';
 import { PREVIEW_PATH_PREFIX, PREVIEW_PUBLIC_PORT, PREVIEW_SERVER_PORT } from './_constants';
 import type {
   AgentProgressEvent,
   CodingAgentResult,
   ConversationMessage,
+  ImageAttachment,
   ProjectState,
   ScaffoldLog,
 } from './_types';

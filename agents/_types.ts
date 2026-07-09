@@ -1,5 +1,3 @@
-import type { SdkMcpToolDefinition } from '@anthropic-ai/claude-agent-sdk';
-
 export type BuildStatus = 'success' | 'failed' | 'skipped';
 
 export type ProjectState = {
@@ -88,4 +86,8 @@ export type AgentProgressEvent =
       };
     };
 
-export type ClaudeMcpTool = SdkMcpToolDefinition<any>;
+// Moved from the removed legacy _agent.ts (dead Claude Agent SDK sandbox path).
+export type ImageAttachment = {
+  mediaType: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp';
+  base64: string;
+};

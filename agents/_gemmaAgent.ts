@@ -8,11 +8,11 @@
 // agnostic; only the wire format to the model differs).
 import { GROQ_TOOLS, executeGroqTool } from './tools/_groq-tools';
 import { buildGroqSystemPrompt } from './_groqAgent';
-import type { ImageAttachment } from './_agent';
 import type {
   AgentProgressEvent,
   CodingAgentResult,
   ConversationMessage,
+  ImageAttachment,
   ProjectState,
   ScaffoldLog,
 } from './_types';

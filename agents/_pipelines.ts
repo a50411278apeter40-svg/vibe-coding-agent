@@ -1,4 +1,3 @@
-import type { ImageAttachment } from './_agent';
 import { runGemmaCodingAgent } from './_gemmaAgent';
 import { AUTO_FIX_MAX_ATTEMPTS } from './_constants';
 import {
@@ -24,6 +23,7 @@ import type {
   AgentProgressEvent,
   BuildStatus,
   FileTreeItem,
+  ImageAttachment,
   ScaffoldLog,
   StreamSend,
 } from './_types';
