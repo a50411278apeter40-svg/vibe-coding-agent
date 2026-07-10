@@ -23,13 +23,23 @@
 # `--include=dev` flag below is a second safety net for the same reason.
 # Next.js sets its own NODE_ENV internally for build vs. start, so you
 # don't need to (and shouldn't) set it yourself.
+#
+# PLAYWRIGHT/CHROMIUM: buildCommand also runs
+# `npx playwright install --with-deps chromium`, which both downloads the
+# Chromium binary and apt-get-installs its required OS shared libraries
+# (libnspr4, libnss3, ...). Render's native Node build environment permits
+# apt-get during the build step, so this works without switching to a Docker
+# runtime. PIXAL2.0's browser_* tools (agents/tools/_browserTools.ts) launch
+# this Chromium directly in the running web service and keep one persistent
+# session per conversation, auto-closing it after 10 minutes of inactivity to
+# free RAM.
 
 services:
   - type: web
     name: pixal2-web
     runtime: node
     plan: free
-    buildCommand: npm install --include=dev && npm run build
+    buildCommand: npm install --include=dev && npx playwright install --with-deps chromium && npm run build
     startCommand: npm run start
     envVars:
       # AI provider key (free tier): Gemma 4 via the Gemini API.

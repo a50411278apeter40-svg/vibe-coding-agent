@@ -611,7 +611,94 @@ type PreviewStartCommand = {
   readyPath: string;
 };
 
+// --- Fullstack support: optional backend process alongside the frontend ---
+// PIXAL2.0 can generate more than a frontend-only page: if the project also
+// has a backend entry point, it is started on an internal-only port
+// (BACKEND_SERVER_PORT) before the frontend dev server starts, loading
+// whatever secrets were saved via save_api_key from the project's own .env.
+// The frontend (Vite's server.proxy, or a Next.js rewrite) is expected to
+// forward /api requests to this port -- see the system prompt instructions
+// in _groqAgent.ts -- so the single public preview URL transparently serves
+// both halves of a fullstack app. Detection is convention-based and
+// deliberately best-effort: a project with no backend simply skips this
+// step with no error.
+const BACKEND_SERVER_PORT = 3001;
+
+async function detectBackendStartCommand(context: any, state: ProjectState): Promise<string | null> {
+  const candidates = [
+    'server/index.js',
+    'server/index.mjs',
+    'server/index.cjs',
+    'backend/index.js',
+    'backend/index.mjs',
+    'backend/server.js',
+  ];
+  for (const relPath of candidates) {
+    const exists = await context.sandbox.files.exists(`${state.appDir}/${relPath}`);
+    if (exists) return `node ${shellQuote(relPath)}`;
+  }
+  const packageExists = await context.sandbox.files.exists(`${state.appDir}/package.json`);
+  if (packageExists) {
+    const metadata = await readPackageMetadata(context, state);
+    if (metadata.scripts?.server) return 'npm run server';
+  }
+  return null;
+}
+
+export async function startBackendServerIfPresent(context: any, state: ProjectState): Promise<{ started: boolean; port?: number }> {
+  const startCommand = await detectBackendStartCommand(context, state);
+  if (!startCommand) return { started: false };
+
+  const port = BACKEND_SERVER_PORT;
+  await runSandboxCommand(
+    context,
+    [
+      'if command -v fuser >/dev/null 2>&1; then',
+      `fuser -k ${port}/tcp 2>/dev/null || true;`,
+      'elif command -v lsof >/dev/null 2>&1; then',
+      `lsof -ti tcp:${port} | xargs -r kill -9 2>/dev/null || true;`,
+      'fi;',
+      'sleep 1',
+    ].join(' '),
+    { timeout: 10 },
+  );
+
+  // Load any secrets saved via save_api_key (a plain .env file in appDir)
+  // into the backend process's real environment, without requiring the
+  // generated backend code to depend on the `dotenv` package itself.
+  const startResult = await runSandboxCommand(
+    context,
+    [
+      ': > /tmp/backend.log;',
+      `nohup env PORT=${port} sh -c "set -a; [ -f .env ] && . ./.env 2>/dev/null; set +a; ${startCommand}" > /tmp/backend.log 2>&1 &`,
+    ].join(' '),
+    { cwd: state.appDir, timeout: 10 },
+  );
+  if (startResult.exitCode !== 0) {
+    throw new Error(startResult.stderr || startResult.stdout || `Failed to start backend server on port ${port}.`);
+  }
+
+  // Best-effort readiness check: wait for the port to actually accept
+  // connections, but never fail project publishing just because a custom
+  // backend has no obvious health endpoint -- log and move on either way.
+  const ready = await runSandboxCommand(
+    context,
+    `for i in $(seq 1 15); do (exec 3<>/dev/tcp/127.0.0.1/${port}) 2>/dev/null && exit 0; sleep 1; done; exit 1`,
+    { timeout: 20 },
+  );
+  if (ready.exitCode !== 0) {
+    debugLog(context, '[backend-preview]', { warning: 'backend did not open its port in time', log: 'see /tmp/backend.log' });
+  }
+
+  return { started: true, port };
+}
+
 export async function startPreviewServer(context: any, state: ProjectState) {
+  // Fullstack projects: bring the backend up first so it is already
+  // listening by the time the frontend dev server (and its /api proxy)
+  // starts. No-op if the project has no backend entry point.
+  await startBackendServerIfPresent(context, state);
+
   const port = PREVIEW_SERVER_PORT;
   const release = await runSandboxCommand(
     context,
@@ -755,7 +842,7 @@ async function detectPreviewStartCommand(
   };
 }
 
-async function readPackageMetadata(
+export async function readPackageMetadata(
   context: any,
   state: ProjectState,
 ): Promise<{
@@ -912,6 +999,105 @@ export async function readFileFromSandbox(
   }
 
   return { ok: true, content, size, truncated };
+}
+
+// --- Project-scoped secret storage (.env) ---------------------------------
+// A tiny, dependency-free .env parser/writer that operates directly on
+// `${state.appDir}/.env` inside the sandbox. This is how PIXAL2.0 lets a
+// user safely hand over an API key mid-conversation (Render, a database URL,
+// a third-party service key the generated app itself needs, etc.) without it
+// having to be hard-coded into a source file. Because the file lives inside
+// appDir, it rides along with every autoSaveProjectSnapshot/
+// restoreProjectSnapshotIfEmpty zip cycle -- so it survives the sandbox
+// being deleted and recreated between turns, exactly like the rest of the
+// project. It is never written into the project's own git history (see
+// ensureGitignoreExcludesEnv in _render.ts) and never echoed back in tool
+// results.
+const PROJECT_ENV_FILENAME = '.env';
+
+function parseEnvFile(raw: string): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const rawLine of raw.split('\n')) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    const eqIdx = line.indexOf('=');
+    if (eqIdx === -1) continue;
+    const key = line.slice(0, eqIdx).trim();
+    let value = line.slice(eqIdx + 1).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"') && value.length >= 2)
+      || (value.startsWith("'") && value.endsWith("'") && value.length >= 2)
+    ) {
+      value = value.slice(1, -1);
+    }
+    if (key) map.set(key, value);
+  }
+  return map;
+}
+
+function serializeEnvFile(map: Map<string, string>): string {
+  const lines: string[] = [];
+  for (const [key, value] of map.entries()) {
+    const needsQuotes = /[\s"'#]/.test(value) || value === '';
+    const escaped = value.replace(/"/g, '\\"');
+    lines.push(needsQuotes ? `${key}="${escaped}"` : `${key}=${value}`);
+  }
+  return lines.join('\n') + (lines.length > 0 ? '\n' : '');
+}
+
+async function readProjectEnvMap(context: any, state: ProjectState): Promise<Map<string, string>> {
+  const path = `${state.appDir}/${PROJECT_ENV_FILENAME}`;
+  const exists = await context.sandbox.files.exists(path);
+  if (!exists) return new Map();
+  // The Daytona adapter only exposes files.exists/write/makeDir (see
+  // DaytonaSandboxAdapter in _daytonaSandbox.ts) -- no files.read -- so, like
+  // readFileFromSandbox above, read the file's bytes back out via a shell
+  // command instead.
+  const result = await runSandboxCommand(context, `cat '${PROJECT_ENV_FILENAME}' 2>/dev/null || true`, {
+    cwd: state.appDir,
+    timeout: 10,
+  });
+  return parseEnvFile(String(result.stdout || ''));
+}
+
+// Saves/overwrites a single KEY=value pair in the project's .env file.
+// Creates the file (and appDir) if it does not exist yet.
+export async function upsertProjectEnvValue(
+  context: any,
+  state: ProjectState,
+  key: string,
+  value: string,
+): Promise<void> {
+  const trimmedKey = key.trim();
+  if (!trimmedKey || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(trimmedKey)) {
+    throw new Error(`Invalid key name: "${key}". Use letters, numbers, and underscores only, e.g. RENDER_API_KEY.`);
+  }
+  await context.sandbox.files.makeDir(state.appDir);
+  const map = await readProjectEnvMap(context, state);
+  map.set(trimmedKey, value);
+  await context.sandbox.files.write(`${state.appDir}/${PROJECT_ENV_FILENAME}`, serializeEnvFile(map));
+}
+
+// Reads a single value back out (used internally by the Render deploy flow --
+// never exposed to the model as a raw dump of everything at once).
+export async function getProjectEnvValue(context: any, state: ProjectState, key: string): Promise<string | undefined> {
+  const map = await readProjectEnvMap(context, state);
+  return map.get(key.trim());
+}
+
+// Lists only the KEY NAMES that have been saved (never values), so the agent
+// can check what secrets already exist without re-displaying them.
+export async function listProjectEnvKeys(context: any, state: ProjectState): Promise<string[]> {
+  const map = await readProjectEnvMap(context, state);
+  return Array.from(map.keys());
+}
+
+// Returns every saved key/value (for internal use only, e.g. forwarding the
+// project's own secrets as env vars to a Render deploy) -- never return this
+// map's values directly in a tool result.
+export async function readAllProjectEnvValues(context: any, state: ProjectState): Promise<Record<string, string>> {
+  const map = await readProjectEnvMap(context, state);
+  return Object.fromEntries(map.entries());
 }
 
 type ProjectArchiveResult =

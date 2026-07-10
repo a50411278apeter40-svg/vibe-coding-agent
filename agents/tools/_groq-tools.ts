@@ -12,19 +12,21 @@ import {
   runSandboxCommand,
   startPreviewServer,
   assertPreviewServerReady,
+  readPackageMetadata,
+  upsertProjectEnvValue,
+  listProjectEnvKeys,
+  getProjectEnvValue,
+  readAllProjectEnvValues,
 } from '../_project';
+import { createGithubRepoAndPush, deployToRenderService } from '../_render';
 import type { ProjectFileInput, ProjectState, ScaffoldLog } from '../_types';
 import { getBlockedProjectWriteReason, normalizeRelPath } from '../utils/_paths';
 import { stringifyToolResult } from '../utils/_text';
+import type { GroqToolSpec, GroqToolExecResult } from './_groq-tools-shared';
+import { BROWSER_TOOLS, BROWSER_TOOL_NAMES, executeBrowserTool } from './_browserTools';
+import { UTILITY_TOOLS, UTILITY_TOOL_NAMES, executeUtilityTool } from './_utilityTools';
 
-export type GroqToolSpec = {
-  type: 'function';
-  function: {
-    name: string;
-    description: string;
-    parameters: Record<string, unknown>;
-  };
-};
+export type { GroqToolSpec, GroqToolExecResult } from './_groq-tools-shared';
 
 // The full tool catalog. Deliberately broader than the old Claude tool set —
 // this adds run_command, read_project_file, list_project_directory,
@@ -173,6 +175,46 @@ export const GROQ_TOOLS: GroqToolSpec[] = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'save_api_key',
+      description: 'Securely save an API key / secret the user gave you (e.g. RENDER_API_KEY, GITHUB_TOKEN, a database URL, a third-party API key the app itself needs) into the project\'s own .env file inside the sandbox. It persists across sandbox restarts and is never committed to git or shown back in chat. Always use this instead of writing secrets into source files.',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: 'Env var name, letters/numbers/underscore only, e.g. RENDER_API_KEY.' },
+          value: { type: 'string', description: 'The secret value.' },
+        },
+        required: ['name', 'value'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'list_saved_api_keys',
+      description: 'List the names (not values) of API keys/secrets already saved for this project via save_api_key, so you know what is already configured before asking the user again.',
+      parameters: { type: 'object', properties: {}, additionalProperties: false },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'deploy_to_render',
+      description: 'Deploy the current project to Render.com as a live web service. Requires RENDER_API_KEY and GITHUB_TOKEN (a GitHub personal access token with "repo" scope) to already be saved via save_api_key -- if either is missing, this returns an error telling you which one to ask the user for. Pushes the project to a new (or existing) GitHub repo under that token\'s account, then creates/updates a Render web service pointing at it, forwarding any other saved project secrets as its environment variables.',
+      parameters: {
+        type: 'object',
+        properties: {
+          serviceName: { type: 'string', description: 'Desired service/repo name. Defaults to a name derived from the project.' },
+          buildCommand: { type: 'string', description: 'Defaults to an auto-detected "npm install [&& npm run build]".' },
+          startCommand: { type: 'string', description: 'Defaults to an auto-detected "npm start"/"npm run dev"/backend entry point.' },
+        },
+      },
+    },
+  },
+  ...BROWSER_TOOLS,
+  ...UTILITY_TOOLS,
 ];
 
 // Unlimited: rawText.slice(0, Infinity) returns the full string, so
@@ -189,8 +231,6 @@ type ExecutorDeps = {
   onPreviewResult?: (result: { url?: string; sandboxDebugUrl?: string }) => void;
 };
 
-export type GroqToolExecResult = { ok: boolean; text: string };
-
 export async function executeGroqTool(
   name: string,
   rawArgs: string,
@@ -201,6 +241,13 @@ export async function executeGroqTool(
     args = rawArgs ? JSON.parse(rawArgs) : {};
   } catch {
     args = {};
+  }
+
+  if ((UTILITY_TOOL_NAMES as readonly string[]).includes(name)) {
+    return executeUtilityTool(name, args);
+  }
+  if ((BROWSER_TOOL_NAMES as readonly string[]).includes(name)) {
+    return executeBrowserTool(name, args, deps.state.sessionDir);
   }
 
   try {
@@ -345,6 +392,73 @@ export async function executeGroqTool(
         const truncated = rawText.length > WEB_FETCH_MAX_CHARS;
         const text = truncated ? rawText.slice(0, WEB_FETCH_MAX_CHARS) : rawText;
         return { ok: true, text: stringifyToolResult({ status: response.status, ok: response.ok, contentType, truncated, body: text }) };
+      }
+
+      case 'save_api_key': {
+        const key = String(args?.name || '').trim();
+        const value = String(args?.value ?? '');
+        if (!key) throw new Error('Missing name.');
+        if (!value) throw new Error('Missing value.');
+        await upsertProjectEnvValue(deps.context, deps.state, key, value);
+        return { ok: true, text: stringifyToolResult({ saved: true, key }) };
+      }
+
+      case 'list_saved_api_keys': {
+        const keys = await listProjectEnvKeys(deps.context, deps.state);
+        return { ok: true, text: stringifyToolResult({ keys }) };
+      }
+
+      case 'deploy_to_render': {
+        if (!deps.state.created) {
+          throw new Error('There is no project to deploy yet. Build something first.');
+        }
+        const renderApiKey = await getProjectEnvValue(deps.context, deps.state, 'RENDER_API_KEY');
+        const githubToken = await getProjectEnvValue(deps.context, deps.state, 'GITHUB_TOKEN');
+        const missing: string[] = [];
+        if (!renderApiKey) missing.push('RENDER_API_KEY');
+        if (!githubToken) missing.push('GITHUB_TOKEN (a GitHub personal access token with "repo" scope)');
+        if (missing.length > 0) {
+          throw new Error(`Cannot deploy yet -- ask the user for the following and save each with save_api_key first: ${missing.join(', ')}.`);
+        }
+
+        const serviceName = typeof args?.serviceName === 'string' && args.serviceName.trim()
+          ? args.serviceName.trim()
+          : `pixal-${deps.state.sessionDir.split('/').pop() || 'project'}`;
+
+        const push = await createGithubRepoAndPush(deps.context, deps.state, githubToken!, serviceName);
+
+        const metadata: { scripts?: Record<string, string>; deps?: Record<string, string> } = await readPackageMetadata(deps.context, deps.state).catch(() => ({ scripts: {}, deps: {} }));
+        const scripts = metadata.scripts || {};
+        const buildCommand = typeof args?.buildCommand === 'string' && args.buildCommand.trim()
+          ? args.buildCommand.trim()
+          : (scripts.build ? 'npm install && npm run build' : 'npm install');
+        const startCommand = typeof args?.startCommand === 'string' && args.startCommand.trim()
+          ? args.startCommand.trim()
+          : (scripts.start ? 'npm start' : (scripts.dev ? 'npm run dev' : 'node server/index.js'));
+
+        const allSecrets = await readAllProjectEnvValues(deps.context, deps.state);
+        const envVars = Object.entries(allSecrets)
+          .filter(([k]) => k !== 'RENDER_API_KEY' && k !== 'GITHUB_TOKEN')
+          .map(([key, value]) => ({ key, value }));
+
+        const deployResult = await deployToRenderService(renderApiKey!, {
+          serviceName,
+          repoUrl: push.htmlUrl,
+          branch: push.defaultBranch,
+          buildCommand,
+          startCommand,
+          envVars,
+        });
+
+        return {
+          ok: true,
+          text: stringifyToolResult({
+            githubRepo: push.htmlUrl,
+            renderDashboard: deployResult.dashboardUrl,
+            liveUrl: deployResult.liveUrl,
+            note: 'The live URL becomes reachable after Render finishes its first build, usually a few minutes.',
+          }),
+        };
       }
 
       default:
