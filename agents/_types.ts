@@ -10,6 +10,13 @@ export type ProjectState = {
   // signed-in user's next message reconnects to the SAME Daytona sandbox
   // instead of paying for a brand-new one every time. See _daytonaSandbox.ts.
   daytonaSandboxId?: string;
+  // Ephemeral, in-memory-only flag for the current turn -- never persisted.
+  // Set by the pipeline for anonymous (not-logged-in) users, whose workspace
+  // must be wiped clean every turn. Consumed and cleared by
+  // ensureProjectScaffold the moment the model actually calls that tool, so
+  // the wipe (and the Daytona sandbox it requires) only happens for turns
+  // that really need a project workspace -- not for every single message.
+  forceReset?: boolean;
 };
 
 export type ConversationMessage = {

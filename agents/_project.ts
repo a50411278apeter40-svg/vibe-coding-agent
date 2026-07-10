@@ -161,7 +161,16 @@ export async function ensureProjectScaffold(
 ) {
   const sandbox = context.sandbox;
   onLog?.({ stream: 'status', content: `Preparing the project workspace ${state.appDir}` });
-  
+
+  // Anonymous (not logged-in) users get a clean workspace every turn -- the
+  // pipeline sets this flag instead of eagerly wiping the sandbox itself, so
+  // the wipe (and the real Daytona sandbox it requires) only happens right
+  // here, the moment the model actually decides a project tool is needed.
+  if (state.forceReset) {
+    state.forceReset = false;
+    await resetProjectWorkspace(context, state);
+  }
+
   await sandbox.files.makeDir(state.sessionDir);
   await sandbox.files.makeDir(state.appDir);
 

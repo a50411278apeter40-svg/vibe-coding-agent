@@ -11,14 +11,13 @@ import {
   createProjectArchive,
   getFileTree,
   readFileFromSandbox,
-  resetProjectWorkspace,
   runVerification,
   writeUploadedFiles,
   type SavedUploadedFile,
   type UploadedFileInput,
 } from './_project';
 import { autoSaveProjectSnapshot, restoreProjectSnapshotIfEmpty } from './_projectStore';
-import { createDaytonaSandboxAdapter } from './_daytonaSandbox';
+import { createLazyDaytonaSandboxAdapter } from './_daytonaSandbox';
 import type {
   AgentProgressEvent,
   BuildStatus,
@@ -267,13 +266,28 @@ function maskConversationId(value: string): string {
 // in a Proxy sidesteps this: it intercepts `sandbox` get/set at the wrapper
 // level regardless of how the underlying property was defined underneath,
 // so it always works, independent of that implementation detail.
-async function attachDaytonaSandbox(
+function attachDaytonaSandbox(
   context: any,
   conversationId: string,
-  existingSandboxId?: string | null,
-): Promise<{ context: any; sandboxId: string | undefined }> {
+  state: { daytonaSandboxId?: string | null },
+): { context: any } {
   try {
-    const adapter = await createDaytonaSandboxAdapter(conversationId, existingSandboxId);
+    const existingSandboxId = state.daytonaSandboxId;
+    // Lazy: this makes NO Daytona API call yet. The real sandbox is only
+    // created/resumed the first time a tool actually touches
+    // context.sandbox.* (see createLazyDaytonaSandboxAdapter) -- most chat
+    // turns are plain questions the model answers directly per
+    // buildGroqSystemPrompt and never need a sandbox at all, so this keeps
+    // ordinary conversation from consuming the org's shared Daytona memory
+    // quota (previously the #1 cause of "Total memory limit exceeded").
+    const adapter = createLazyDaytonaSandboxAdapter(conversationId, existingSandboxId, (resolvedId) => {
+      state.daytonaSandboxId = resolvedId;
+      debugLog(context, '[sandbox]', {
+        stage: 'daytona-resolved',
+        sandboxId: resolvedId,
+        reused: Boolean(existingSandboxId && existingSandboxId === resolvedId),
+      });
+    });
     const proxied = new Proxy(context, {
       get(target, prop, receiver) {
         if (prop === 'sandbox') return adapter;
@@ -284,18 +298,13 @@ async function attachDaytonaSandbox(
         return Reflect.set(target, prop, value, receiver);
       },
     });
-    debugLog(proxied, '[sandbox]', {
-      stage: 'daytona-attached',
-      sandboxId: adapter.id,
-      reused: Boolean(existingSandboxId && existingSandboxId === adapter.id),
-    });
-    return { context: proxied, sandboxId: adapter.id };
+    return { context: proxied };
   } catch (error) {
     console.warn('[sandbox]', {
       stage: 'daytona-attach-failed',
       error: error instanceof Error ? error.message : String(error || ''),
     });
-    return { context, sandboxId: existingSandboxId || undefined };
+    return { context };
   }
 }
 
@@ -349,9 +358,8 @@ export async function runFileReadPipeline(context: any): Promise<Response> {
 
   const state = await getProjectState(context, conversationId);
   {
-    const sandboxAttach = await attachDaytonaSandbox(context, conversationId, state.daytonaSandboxId);
+    const sandboxAttach = attachDaytonaSandbox(context, conversationId, state);
     context = sandboxAttach.context;
-    state.daytonaSandboxId = sandboxAttach.sandboxId;
   }
   debugLog(context, '[file-read]', {
     ...diagnosticBase,
@@ -407,9 +415,8 @@ export async function runProjectDetailPipeline(context: any): Promise<Response> 
 
   const state = await getProjectState(context, conversationId);
   {
-    const sandboxAttach = await attachDaytonaSandbox(context, conversationId, state.daytonaSandboxId);
+    const sandboxAttach = attachDaytonaSandbox(context, conversationId, state);
     context = sandboxAttach.context;
-    state.daytonaSandboxId = sandboxAttach.sandboxId;
   }
   await restoreProjectSnapshotIfEmpty(context, conversationId, userId, state);
   await saveProjectState(context, conversationId, state);
@@ -458,9 +465,8 @@ export async function runProjectDownloadPipeline(context: any): Promise<Response
 
   const state = await getProjectState(context, conversationId);
   {
-    const sandboxAttach = await attachDaytonaSandbox(context, conversationId, state.daytonaSandboxId);
+    const sandboxAttach = attachDaytonaSandbox(context, conversationId, state);
     context = sandboxAttach.context;
-    state.daytonaSandboxId = sandboxAttach.sandboxId;
   }
 
   let archive;
@@ -586,16 +592,17 @@ export async function runChatPipeline(
     ? createProjectState(conversationId)
     : await getProjectState(context, conversationId);
   {
-    const sandboxAttach = await attachDaytonaSandbox(
-      context,
-      conversationId,
-      shouldResetProject ? undefined : state.daytonaSandboxId,
-    );
+    if (shouldResetProject) {
+      state.daytonaSandboxId = undefined;
+    }
+    const sandboxAttach = attachDaytonaSandbox(context, conversationId, state);
     context = sandboxAttach.context;
-    state.daytonaSandboxId = sandboxAttach.sandboxId;
   }
   if (shouldResetProject) {
-    await resetProjectWorkspace(context, state);
+    // Deferred: the actual sandbox wipe now happens lazily inside
+    // ensureProjectScaffold, only if/when the model decides this turn
+    // needs a project tool at all (see the forceReset flag on ProjectState).
+    state.forceReset = true;
   } else if (loggedInUserId) {
     // This conversation's sandbox instance may have been recycled since the
     // user's last visit; silently rehydrate their saved files before the

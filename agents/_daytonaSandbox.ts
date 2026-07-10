@@ -79,16 +79,31 @@ async function resolveRawSandbox(conversationId: string, existingSandboxId?: str
       // we pin a concrete Node.js image rather than a bare snapshot.
       image: 'node:20',
       language: 'javascript',
-      resources: { cpu: 2, memory: 4, disk: 8 },
+      // Kept deliberately small: the org-wide Daytona free-tier quota is a
+      // *total* memory ceiling across every concurrently-running sandbox
+      // (10GiB at the time of writing), not a per-sandbox or per-request
+      // limit. At the previous 4GiB/sandbox footprint only 2 conversations
+      // could ever be live at once — a 3rd user (or even a 3rd test run)
+      // got a hard "Total memory limit exceeded" failure. A lightweight
+      // Next.js/Vite dev server plus npm install comfortably fits in 1GiB,
+      // which raises that ceiling to 10 concurrent conversations instead.
+      resources: { cpu: 1, memory: 1, disk: 3 },
       // Mirrors the platform's own ~30 minute idle timeout for the sandbox
       // it used to inject (see edgeone.json's agents.sandbox.timeout).
       autoStopInterval: 30,
-      // Never auto-delete: Supabase-backed file snapshots are the durable
-      // source of truth already, but keeping the sandbox itself around
-      // means signed-in users resume the SAME warm sandbox (with
-      // node_modules intact) instead of paying for a fresh npm install
-      // every time it is reused within its stopped-but-not-deleted window.
-      autoDeleteInterval: -1,
+      // IMPORTANT: a Daytona sandbox that is merely "stopped" (not deleted)
+      // still counts against the org's total memory quota -- confirmed live
+      // by observing `Total memory limit exceeded` while every sandbox but
+      // one was in the `stopped` state. Combined with the old `-1` (never
+      // auto-delete) setting, every conversation that ever existed would
+      // permanently reserve its slice of the shared 10GiB quota forever,
+      // eventually locking out all new sandboxes regardless of how idle
+      // everyone's projects were. 7 days gives signed-in users a full week
+      // of "resume the same warm sandbox" convenience (Supabase-backed file
+      // snapshots are the durable source of truth regardless, so nothing is
+      // ever actually lost) while guaranteeing abandoned sandboxes
+      // eventually give their quota back.
+      autoDeleteInterval: 10080,
     });
   }
 
@@ -96,12 +111,7 @@ async function resolveRawSandbox(conversationId: string, existingSandboxId?: str
   return raw;
 }
 
-export async function createDaytonaSandboxAdapter(
-  conversationId: string,
-  existingSandboxId?: string | null,
-): Promise<DaytonaSandboxAdapter> {
-  const raw = await resolveRawSandbox(conversationId, existingSandboxId);
-
+function buildAdapterFromRaw(raw: any): DaytonaSandboxAdapter {
   return {
     id: raw.id as string,
     files: {
@@ -160,6 +170,92 @@ export async function createDaytonaSandboxAdapter(
       } catch {
         // Best-effort: a failed activity refresh should never break a live turn.
       }
+    },
+    envdAccessToken: undefined,
+    browser: undefined,
+  };
+}
+
+export async function createDaytonaSandboxAdapter(
+  conversationId: string,
+  existingSandboxId?: string | null,
+): Promise<DaytonaSandboxAdapter> {
+  const raw = await resolveRawSandbox(conversationId, existingSandboxId);
+  return buildAdapterFromRaw(raw);
+}
+
+// Lazy variant: returns a same-shaped adapter SYNCHRONOUSLY, without making
+// any Daytona API call yet. The very first time any of its methods actually
+// runs, it resolves (and, if needed, creates) the real sandbox, then reuses
+// it for every later call. This matters because a huge fraction of chat
+// turns are plain questions/conversation that the system prompt already
+// tells the model to answer directly (no project tools at all, see
+// buildGroqSystemPrompt) — eagerly creating/resuming a real sandbox on
+// every single turn regardless of whether it will ever be touched wastes
+// the org's shared Daytona memory quota and was the direct cause of
+// "Total memory limit exceeded" failures during ordinary use. With this,
+// a sandbox is only ever spun up for turns that actually need one.
+//
+// `onResolved` fires once, right after the real sandbox is known, so the
+// caller can persist the resolved id onto ProjectState (which may not have
+// existed yet at attach time for a brand-new conversation).
+export function createLazyDaytonaSandboxAdapter(
+  conversationId: string,
+  existingSandboxId: string | null | undefined,
+  onResolved?: (sandboxId: string) => void,
+): DaytonaSandboxAdapter {
+  let resolvedPromise: Promise<any> | null = null;
+  let resolvedId: string | undefined = existingSandboxId || undefined;
+
+  const ensureRaw = (): Promise<any> => {
+    if (!resolvedPromise) {
+      resolvedPromise = resolveRawSandbox(conversationId, existingSandboxId).then((raw) => {
+        resolvedId = raw.id as string;
+        onResolved?.(resolvedId);
+        return raw;
+      });
+    }
+    return resolvedPromise;
+  };
+
+  return {
+    get id() {
+      // Best-effort synchronous value: the previously-known id before
+      // resolution, or the real one once resolved. Nothing in this
+      // codebase relies on `.id` being accurate before the first async
+      // method call actually runs.
+      return resolvedId || '';
+    },
+    files: {
+      async exists(path: string) {
+        const raw = await ensureRaw();
+        return buildAdapterFromRaw(raw).files.exists(path);
+      },
+      async write(path: string, content: string | Buffer) {
+        const raw = await ensureRaw();
+        return buildAdapterFromRaw(raw).files.write(path, content);
+      },
+      async makeDir(path: string) {
+        const raw = await ensureRaw();
+        return buildAdapterFromRaw(raw).files.makeDir(path);
+      },
+    },
+    commands: {
+      async run(command: string, options?: { cwd?: string; timeout?: number; env?: Record<string, string> }) {
+        const raw = await ensureRaw();
+        return buildAdapterFromRaw(raw).commands.run(command, options);
+      },
+    },
+    async getSignedPreviewUrl(port: number, expiresInSeconds = 3600) {
+      const raw = await ensureRaw();
+      return buildAdapterFromRaw(raw).getSignedPreviewUrl(port, expiresInSeconds);
+    },
+    getInfo() {
+      return { id: resolvedId || '', state: undefined };
+    },
+    async extendTimeout(seconds: number) {
+      const raw = await ensureRaw();
+      return buildAdapterFromRaw(raw).extendTimeout(seconds);
     },
     envdAccessToken: undefined,
     browser: undefined,
