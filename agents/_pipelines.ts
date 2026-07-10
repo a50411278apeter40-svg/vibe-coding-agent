@@ -17,7 +17,7 @@ import {
   type UploadedFileInput,
 } from './_project';
 import { autoSaveProjectSnapshot, restoreProjectSnapshotIfEmpty } from './_projectStore';
-import { createLazyDaytonaSandboxAdapter } from './_daytonaSandbox';
+import { createLazyDaytonaSandboxAdapter, scheduleDaytonaSandboxDelete } from './_daytonaSandbox';
 import type {
   AgentProgressEvent,
   BuildStatus,
@@ -426,6 +426,12 @@ export async function runProjectDetailPipeline(context: any): Promise<Response> 
     getFileTree(context, state).catch(() => [] as FileTreeItem[]),
   ]);
 
+  // The sidebar just needed to peek at (and possibly restore) this project's
+  // files/preview -- give the sandbox a short idle grace period for the
+  // returned preview link to keep working, then reclaim its quota. Any
+  // further edit through /chat resumes the same sandbox and cancels this.
+  scheduleDaytonaSandboxDelete(conversationId, state.daytonaSandboxId);
+
   return new Response(
     JSON.stringify({
       ok: true,
@@ -762,6 +768,7 @@ export async function runChatPipeline(
     await saveProjectState(context, conversationId, state);
     if (loggedInUserId) {
       await autoSaveProjectSnapshot(context, conversationId, loggedInUserId, state, effectiveMessage);
+      scheduleDaytonaSandboxDelete(conversationId, state.daytonaSandboxId);
     }
 
     send({
@@ -799,6 +806,7 @@ export async function runChatPipeline(
     await saveProjectState(context, conversationId, state);
     if (loggedInUserId) {
       await autoSaveProjectSnapshot(context, conversationId, loggedInUserId, state, effectiveMessage);
+      scheduleDaytonaSandboxDelete(conversationId, state.daytonaSandboxId);
     }
 
     send({
@@ -822,6 +830,14 @@ export async function runChatPipeline(
     await appendTurn(context, conversationId, 'user', effectiveMessage);
     await appendTurn(context, conversationId, 'assistant', assistantReply);
     logHistory('assistant', assistantReply, {});
+    // No project edits happened this turn, but restoreProjectSnapshotIfEmpty
+    // (called earlier, unconditionally, for every signed-in non-reset turn)
+    // may still have resumed/created a real Daytona sandbox just to check
+    // the workspace. Give that quota back too instead of leaving it idle.
+    await saveProjectState(context, conversationId, state);
+    if (loggedInUserId) {
+      scheduleDaytonaSandboxDelete(conversationId, state.daytonaSandboxId);
+    }
 
     send({
       type: 'result',
@@ -855,6 +871,7 @@ export async function runChatPipeline(
     await saveProjectState(context, conversationId, state);
     if (loggedInUserId) {
       await autoSaveProjectSnapshot(context, conversationId, loggedInUserId, state, effectiveMessage);
+      scheduleDaytonaSandboxDelete(conversationId, state.daytonaSandboxId);
     }
 
     send({
@@ -936,6 +953,7 @@ export async function runChatPipeline(
       await saveProjectState(context, conversationId, state);
       if (loggedInUserId) {
         await autoSaveProjectSnapshot(context, conversationId, loggedInUserId, state, effectiveMessage);
+        scheduleDaytonaSandboxDelete(conversationId, state.daytonaSandboxId);
       }
 
       send({
@@ -1008,6 +1026,7 @@ export async function runChatPipeline(
   await saveProjectState(context, conversationId, state);
   if (loggedInUserId) {
     await autoSaveProjectSnapshot(context, conversationId, loggedInUserId, state, effectiveMessage);
+    scheduleDaytonaSandboxDelete(conversationId, state.daytonaSandboxId);
   }
 
   send({

@@ -3,18 +3,19 @@
 // Chat history and build/preview state for a conversation already persist
 // durably through the platform's own context.store (see _memory.ts) — that
 // part is not something this project manages. What IS at risk is the actual
-// project FILES: they live on the sandbox's disk, and this project's own
-// rule is that only signed-in users keep a sandbox across turns at all (see
-// _pipelines.ts's shouldResetProject). Even for signed-in users, the sandbox
-// instance itself can be recycled by the platform after long idle periods,
-// so this module keeps an independent, durable copy of the text files in
-// Supabase and can restore them into a fresh sandbox on demand.
+// project FILES: they live on the sandbox's disk, and (as of the Daytona
+// migration) sandboxes are deliberately short-lived -- they get deleted
+// shortly after each turn to free up the org's shared CPU/memory quota (see
+// scheduleDaytonaSandboxDelete in _daytonaSandbox.ts). This module is what
+// makes that safe: it keeps a complete, lossless copy of every project file
+// in Supabase (as a zip archive, so binaries survive too, not just text) and
+// restores it into a fresh sandbox on demand.
 //
 // Best-effort everywhere: a Supabase hiccup must never break a live chat
 // turn, so every exported function swallows its own errors.
 
 import type { ProjectState } from './_types';
-import { getFileTree, readFileFromSandbox, runSandboxCommand } from './_project';
+import { createProjectArchive, extractProjectArchive, runSandboxCommand } from './_project';
 
 function getSupabaseConfig(context: any): { url: string; key: string } | null {
   const url = context?.env?.SUPABASE_URL || process.env?.SUPABASE_URL;
@@ -38,11 +39,6 @@ async function supabaseFetch(context: any, path: string, init: RequestInit = {})
     return null;
   }
 }
-
-// Combined guardrails so one huge/odd project can never blow up a Supabase
-// free-tier row or a slow request: same file-count cap as the Files panel
-// (getFileTree already caps at 220), plus a total-bytes cap across all files.
-const MAX_SNAPSHOT_TOTAL_BYTES = 3 * 1024 * 1024; // 3MB combined text content.
 
 function deriveTitleFromMessage(message: string): string {
   const normalized = String(message || '').replace(/\s+/g, ' ').trim();
@@ -69,10 +65,17 @@ async function getExistingProjectMeta(
   return rows[0] || null;
 }
 
-// Reads every text file currently in the sandbox project dir (reusing the
-// same ignore/size rules as the Files panel) and upserts it as this
-// conversation's saved project snapshot for `userId`. Call this whenever the
-// project's files may have changed and the user is signed in.
+// Zips the entire current project workspace (every file — text AND binary —
+// except regenerable build artifacts like node_modules/.git/.next, see
+// ARCHIVE_EXCLUDED_DIRECTORIES in _constants.ts) and upserts it as this
+// conversation's saved snapshot for `userId`. This is the *only* copy of the
+// project's files that survives once the sandbox itself is deleted, so
+// nothing is capped/truncated here the way the old per-file text snapshot
+// used to be (that approach silently dropped files past a 3MB total or a
+// 220-file-count limit, and refused binary files outright — unacceptable
+// now that this is the sole persistence path, not just a convenience cache).
+// Call this whenever the project's files may have changed and the user is
+// signed in.
 export async function autoSaveProjectSnapshot(
   context: any,
   conversationId: string,
@@ -84,25 +87,17 @@ export async function autoSaveProjectSnapshot(
   if (!getSupabaseConfig(context)) return;
 
   try {
-    const tree = await getFileTree(context, state);
-    const fileItems = tree.filter((item) => item.type === 'file');
-    if (fileItems.length === 0) return;
-
-    const files: Record<string, string> = {};
-    let totalBytes = 0;
-    for (const item of fileItems) {
-      const res = await readFileFromSandbox(context, state, item.path);
-      if (!res.ok || typeof res.content !== 'string') continue;
-      const size = typeof res.size === 'number' ? res.size : res.content.length;
-      if (totalBytes + size > MAX_SNAPSHOT_TOTAL_BYTES) break;
-      files[item.path] = res.content;
-      totalBytes += size;
+    const archive = await createProjectArchive(context, state);
+    if (!archive.ok) {
+      // Empty workspace, or over the (generous, 60MB) archive size ceiling —
+      // nothing sane to save either way.
+      return;
     }
-    if (Object.keys(files).length === 0) return;
 
     const existing = await getExistingProjectMeta(context, conversationId);
     const title = existing?.title || deriveTitleFromMessage(firstMessage);
     const id = existing?.id || generateProjectId();
+    const format = archive.filename.endsWith('.tar.gz') ? 'tar.gz' : 'zip';
 
     await supabaseFetch(context, 'projects?on_conflict=conversation_id', {
       method: 'POST',
@@ -112,7 +107,9 @@ export async function autoSaveProjectSnapshot(
         user_id: userId,
         conversation_id: conversationId,
         title,
-        files,
+        archive_base64: archive.base64,
+        archive_format: format,
+        archive_size: archive.size,
         updated_at: new Date().toISOString(),
       }),
     });
@@ -142,10 +139,12 @@ async function isSandboxProjectEmpty(context: any, state: ProjectState): Promise
   return existing.stdout.trim().length === 0;
 }
 
-// If this conversation's sandbox project dir is currently empty (fresh or
-// recycled sandbox) and a Supabase snapshot exists for it, writes every saved
-// file back in. Returns true when files were restored. Safe to call even
-// when there is nothing to restore — it's a no-op in that case.
+// If this conversation's sandbox project dir is currently empty (fresh sandbox
+// — expected on almost every turn now, since sandboxes are deleted shortly
+// after each turn to free quota) and a Supabase snapshot exists for it,
+// unpacks the full saved zip archive back in. Returns true when files were
+// restored. Safe to call even when there is nothing to restore — it's a
+// no-op in that case.
 export async function restoreProjectSnapshotIfEmpty(
   context: any,
   conversationId: string,
@@ -161,32 +160,20 @@ export async function restoreProjectSnapshotIfEmpty(
 
     const response = await supabaseFetch(
       context,
-      `projects?conversation_id=eq.${encodeURIComponent(conversationId)}&select=files&limit=1`,
+      `projects?conversation_id=eq.${encodeURIComponent(conversationId)}&select=archive_base64,archive_format&limit=1`,
     );
     if (!response || !response.ok) return false;
-    const rows = (await response.json().catch(() => [])) as Array<{ files?: Record<string, string> }>;
-    const files = rows[0]?.files;
-    if (!files || typeof files !== 'object' || Object.keys(files).length === 0) return false;
+    const rows = (await response.json().catch(() => [])) as Array<{
+      archive_base64?: string;
+      archive_format?: string;
+    }>;
+    const row = rows[0];
+    const base64 = row?.archive_base64;
+    if (!base64 || typeof base64 !== 'string') return false;
 
-    const sandbox = context.sandbox;
-    const dirsCreated = new Set<string>();
-    for (const [relPath, content] of Object.entries(files)) {
-      if (typeof content !== 'string') continue;
-      const segments = relPath.split('/');
-      segments.pop();
-      let dirPath = '';
-      for (const segment of segments) {
-        if (!segment) continue;
-        dirPath = dirPath ? `${dirPath}/${segment}` : segment;
-        const absDir = `${state.appDir}/${dirPath}`;
-        if (!dirsCreated.has(absDir)) {
-          await sandbox.files.makeDir(absDir);
-          dirsCreated.add(absDir);
-        }
-      }
-      await sandbox.files.write(`${state.appDir}/${relPath}`, content);
-    }
-    return true;
+    const format = row?.archive_format === 'tar.gz' ? 'tar.gz' : 'zip';
+    const result = await extractProjectArchive(context, state, base64, format);
+    return result.ok;
   } catch {
     return false;
   }

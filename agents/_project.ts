@@ -1077,6 +1077,64 @@ export async function createProjectArchive(
   };
 }
 
+// The inverse of createProjectArchive(): decodes a base64 zip/tar.gz payload
+// (as produced by createProjectArchive above) and unpacks it into state.appDir.
+// Used by _projectStore.ts to restore a signed-in user's full, lossless
+// Supabase-saved snapshot into a fresh sandbox -- every file that was
+// archived (all text AND binary files; only regenerable build artifacts
+// like node_modules/.git/.next are excluded, see ARCHIVE_EXCLUDED_DIRECTORIES)
+// comes back exactly as it was.
+export async function extractProjectArchive(
+  context: any,
+  state: ProjectState,
+  base64: string,
+  format: 'zip' | 'tar.gz',
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const sandbox = context.sandbox;
+  await sandbox.files.makeDir(state.sessionDir);
+  await sandbox.files.makeDir(state.appDir);
+
+  const cleaned = String(base64 || '').replace(/\s+/g, '');
+  if (!cleaned) {
+    return { ok: false, error: 'Empty archive payload.' };
+  }
+
+  const stamp = Date.now();
+  const tmpB64Path = `${state.sessionDir}/.restore-${stamp}.b64`;
+  const archivePath = `${state.sessionDir}/.restore-${stamp}.${format === 'tar.gz' ? 'tar.gz' : 'zip'}`;
+
+  try {
+    await sandbox.files.write(tmpB64Path, cleaned);
+    const decode = await runSandboxCommand(
+      context,
+      `base64 -d ${shellQuote(tmpB64Path)} > ${shellQuote(archivePath)}`,
+      { timeout: 120 },
+    );
+    if (decode.exitCode !== 0) {
+      return { ok: false, error: decode.stderr || decode.stdout || 'base64 decode failed' };
+    }
+
+    // No `cwd` override here (unlike other sandbox commands elsewhere in this
+    // file): archivePath/tmpB64Path are relative paths resolved against the
+    // sandbox's default working directory, same as the write/decode steps
+    // above. `-C state.appDir` already tells tar/unzip where to extract TO;
+    // setting `cwd: state.appDir` here as well would make archivePath itself
+    // get resolved relative to appDir instead, and it would not be found.
+    const extractCmd = format === 'tar.gz'
+      ? `tar -xzf ${shellQuote(archivePath)} -C ${shellQuote(state.appDir)}`
+      : `unzip -o -q ${shellQuote(archivePath)} -d ${shellQuote(state.appDir)}`;
+    const extract = await runSandboxCommand(context, extractCmd, { timeout: 120 });
+    if (extract.exitCode !== 0) {
+      return { ok: false, error: extract.stderr || extract.stdout || 'Failed to extract the archive.' };
+    }
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : 'Failed to restore the archive.' };
+  } finally {
+    await runSandboxCommand(context, `rm -f ${shellQuote(tmpB64Path)} ${shellQuote(archivePath)}`, { timeout: 30 }).catch(() => {});
+  }
+}
+
 // ---- User-uploaded file attachments ----------------------------------------
 // write_project_files / files_write only handle UTF-8 text. Uploaded binary
 // files (images, PDFs, archives, anything) are written directly as bytes via a

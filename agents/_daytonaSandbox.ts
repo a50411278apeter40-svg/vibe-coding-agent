@@ -55,7 +55,68 @@ function getClient(): InstanceType<typeof Daytona> {
 // the caller should read from and write back into ProjectState.
 const warmCache = new Map<string, any>();
 
+// Deliberate proactive cleanup on top of Daytona's own autoDeleteInterval
+// (7 days -- see resolveRawSandbox below). A `started` (or even `stopped`)
+// sandbox permanently reserves its slice of the org's shared CPU+memory
+// quota until it is actually deleted, so waiting a full week to reclaim an
+// idle conversation's sandbox meant the org could run out of quota (both
+// CPU and memory) after only ~10 conversations had ever touched a project,
+// regardless of how idle most of them were. Instead, once a turn finishes
+// using a sandbox we schedule its deletion after a short idle grace period
+// (long enough that the user can still view/click around the preview they
+// were just given) rather than deleting it synchronously in the same
+// request. Signed-in users never lose anything: autoSaveProjectSnapshot
+// keeps a full zip snapshot of every project file in Supabase, and
+// restoreProjectSnapshotIfEmpty unpacks it back into a brand-new sandbox
+// the next time the conversation is touched.
+const SANDBOX_IDLE_DELETE_MS = 2 * 60 * 1000; // 2 minutes
+const pendingDeletions = new Map<string, ReturnType<typeof setTimeout>>();
+
+export function cancelScheduledDaytonaDelete(conversationId: string): void {
+  const timer = pendingDeletions.get(conversationId);
+  if (timer) {
+    clearTimeout(timer);
+    pendingDeletions.delete(conversationId);
+  }
+}
+
+// Actually deletes a sandbox right now (frees its quota immediately). Used
+// both by the delayed cleanup below and directly wherever an immediate,
+// synchronous free-up is preferable to waiting out the grace period.
+export async function deleteDaytonaSandbox(conversationId: string, sandboxId?: string | null): Promise<void> {
+  cancelScheduledDaytonaDelete(conversationId);
+  warmCache.delete(conversationId);
+  if (!sandboxId) return;
+  try {
+    const daytona = getClient();
+    const raw = await daytona.get(sandboxId);
+    await daytona.delete(raw);
+  } catch {
+    // Best-effort: already gone, or the delete call failed -- the 7-day
+    // autoDeleteInterval remains as a fallback safety net either way.
+  }
+}
+
+// Schedules (rather than immediately performs) the sandbox deletion so an
+// idle conversation gives up its quota soon, but a user still looking at
+// the preview they just got isn't cut off mid-click. Any later turn that
+// actually resolves/reuses this same sandbox (see resolveRawSandbox) cancels
+// the pending timer first, so active use is never interrupted.
+export function scheduleDaytonaSandboxDelete(conversationId: string, sandboxId?: string | null): void {
+  if (!sandboxId) return;
+  cancelScheduledDaytonaDelete(conversationId);
+  const timer = setTimeout(() => {
+    pendingDeletions.delete(conversationId);
+    void deleteDaytonaSandbox(conversationId, sandboxId);
+  }, SANDBOX_IDLE_DELETE_MS);
+  if (typeof (timer as any).unref === 'function') (timer as any).unref();
+  pendingDeletions.set(conversationId, timer);
+}
+
 async function resolveRawSandbox(conversationId: string, existingSandboxId?: string | null): Promise<any> {
+  // Any turn that actually reaches for the sandbox again cancels a pending
+  // idle-delete from an earlier turn -- it is clearly still in active use.
+  cancelScheduledDaytonaDelete(conversationId);
   const cached = warmCache.get(conversationId);
   if (cached) return cached;
 
